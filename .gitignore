@@ -1,0 +1,23 @@
+# Shared scratch — never commit
+_comms/
+
+# SwiftPM
+.build/
+Packages/
+Package.resolved
+Flipgrade.app/
+.flipgrade-repo-root
+
+# macOS / Xcode
+.DS_Store
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+build/
+.swiftpm/
+**/xcshareddata/WorkspaceSettings.xcsettings
