@@ -2,22 +2,16 @@
 
 Native macOS photo culling + grading.
 
-**Photo editing shouldn’t be a chore.** Flip through a folder fast, mark Keepers / Archive / Rejects, grade later.
+**Photo editing shouldn’t be a chore.** Flip through a folder fast, star your favorites, grade later.
 
-**Version:** v0.1.0 — Phase 0 spike (Cover Flow cull). Phase 1 cull product next.
+**Version:** v0.1.1 — star-layer cull, progressive RAW previews, Space 1:1 zoom.
 
-## What’s in v0.1.0
+## Cull model
 
-- Open a folder of RAWs/JPEGs (auto-opens `_comms/Zion` if present)
-- Cover Flow–style Flip browser (interrupt-safe stacked flips)
-- Embedded-preview pipeline (avoid full demosaic while culling)
-- Keys: `←` `→` flip · `P` keeper · `A` archive · `X` reject · `U` undecided · `⌘O` open folder
-- Decisions saved to `_flipgrade/index.json` inside the folder
-
-## Requirements
-
-- macOS 14+
-- Swift 6 / Xcode Command Line Tools (full Xcode optional for now)
+- **0–3 stars** on each photo (`0` `1` `2` `3`)
+- **Layers** (↑ / ↓): `ALL` → ≥1★ → ≥2★ → 3★
+- Flip within a layer with ← / →
+- Ratings saved to `_flipgrade/index.json`
 
 ## Run
 
@@ -26,9 +20,12 @@ chmod +x Scripts/run.sh
 ./Scripts/run.sh
 ```
 
-That builds a `Flipgrade.app` bundle and opens it with LaunchServices (needed for a real window/Dock icon). Raw `.build/debug/Flipgrade` often stays invisible when launched from a tooling shell.
+## Requirements
+
+- macOS 14+
+- Swift 6 / Xcode Command Line Tools
 
 ## Notes
 
 - `_comms/` is gitignored shared scratch (Zion ORF corpus).
-- Grade tools (WB, LAB, crop) are intentionally not in this spike.
+- Grade tools (WB, LAB, crop) are not in this spike.

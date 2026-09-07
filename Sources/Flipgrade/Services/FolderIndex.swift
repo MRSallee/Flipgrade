@@ -6,20 +6,20 @@ enum FolderIndex {
         "jpg", "jpeg", "heic", "png", "tif", "tiff"
     ]
 
-    static func loadPhotos(in folder: URL) throws -> [PhotoItem] {
+    /// Lightweight listing — avoid per-file resourceValues (can stall on CloudStorage).
+    nonisolated static func loadPhotos(in folder: URL) throws -> [PhotoItem] {
         let fm = FileManager.default
         let contents = try fm.contentsOfDirectory(
             at: folder,
-            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         )
 
         return contents
             .filter { url in
-                guard url.lastPathComponent != "_flipgrade" else { return false }
-                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true else {
-                    return false
-                }
+                let name = url.lastPathComponent
+                guard name != "_flipgrade" else { return false }
+                guard !name.hasPrefix(".") else { return false }
                 return imageExtensions.contains(url.pathExtension.lowercased())
             }
             .map(PhotoItem.init)

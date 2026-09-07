@@ -13,8 +13,9 @@ struct ContentView: View {
             }
         }
         .background(Color.black)
-        .onAppear {
-            session.openDefaultZionIfPresent()
+        .task {
+            // Prefer .task over onAppear — more reliable for WindowGroup launch restore.
+            session.restoreFolderIfPossible()
         }
         .focusable()
         .focusEffectDisabled()
@@ -26,20 +27,32 @@ struct ContentView: View {
             session.goNext()
             return .handled
         }
-        .onKeyPress(characters: CharacterSet(charactersIn: "pP")) { _ in
-            session.mark(.keeper)
+        .onKeyPress(.downArrow) {
+            session.goLayerDown()
             return .handled
         }
-        .onKeyPress(characters: CharacterSet(charactersIn: "aA")) { _ in
-            session.mark(.archive)
+        .onKeyPress(.upArrow) {
+            session.goLayerUp()
             return .handled
         }
-        .onKeyPress(characters: CharacterSet(charactersIn: "xX")) { _ in
-            session.mark(.reject)
+        .onKeyPress(.space) {
+            session.togglePixelZoom()
             return .handled
         }
-        .onKeyPress(characters: CharacterSet(charactersIn: "uU")) { _ in
-            session.mark(.undecided, advance: false)
+        .onKeyPress(characters: CharacterSet(charactersIn: "0")) { _ in
+            session.rate(0)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "1")) { _ in
+            session.rate(1)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "2")) { _ in
+            session.rate(2)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "3")) { _ in
+            session.rate(3)
             return .handled
         }
     }
@@ -48,14 +61,22 @@ struct ContentView: View {
         VStack(spacing: 16) {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 48))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.85))
             Text(session.statusMessage)
-                .foregroundStyle(.secondary)
-            Button("Open Folder…") {
-                session.openFolder()
+                .foregroundStyle(.white.opacity(0.9))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            if session.isLoading {
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(.white)
+            } else {
+                Button("Open Folder…") {
+                    session.openFolder()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("o", modifiers: .command)
             }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut("o", modifiers: .command)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)

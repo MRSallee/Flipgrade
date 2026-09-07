@@ -20,11 +20,36 @@ struct FlipgradeApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
             }
+
+            CommandMenu("Rate") {
+                Button("Clear (0★)") { session.rate(0) }
+                    .keyboardShortcut("0", modifiers: [])
+                Button("1★") { session.rate(1) }
+                    .keyboardShortcut("1", modifiers: [])
+                Button("2★") { session.rate(2) }
+                    .keyboardShortcut("2", modifiers: [])
+                Button("3★") { session.rate(3) }
+                    .keyboardShortcut("3", modifiers: [])
+            }
+
+            CommandMenu("Layer") {
+                Button("All Photos") {
+                    session.setLayer(.all)
+                }
+                Button("Stricter (↓)") {
+                    session.goLayerDown()
+                }
+                .keyboardShortcut(.downArrow, modifiers: [])
+                Button("Looser (↑)") {
+                    session.goLayerUp()
+                }
+                .keyboardShortcut(.upArrow, modifiers: [])
+            }
         }
 
         Settings {
             Form {
-                Text("Phase 0 spike — cull speed only. Grade tools come later.")
+                Text("Flipgrade — 0–3★ cull layers. Grade tools come later.")
                     .foregroundStyle(.secondary)
             }
             .frame(width: 360)
