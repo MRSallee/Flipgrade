@@ -17,6 +17,11 @@ struct CoverFlowView: View {
     @State private var fanAnim: CullClockAnim?
     @State private var liftAnim: CullClockAnim?
     @State private var zoomMouseFraction = CGPoint(x: 0.5, y: 0.5)
+    @State private var isHoveringPhoto = false
+    /// Accumulated trackpad/mouse-wheel delta — OS momentum keeps feeding this after lift.
+    @State private var scrollDebt: CGFloat = 0
+    /// Last selection used to bias prefetch toward scroll direction.
+    @State private var priorSelectionIndex: Int = 0
 
     private let sideCount = 2
     private let flipDuration: TimeInterval = 0.20
@@ -25,6 +30,8 @@ struct CoverFlowView: View {
     private let flashFadeDuration: TimeInterval = 0.05
     private let flashHoldNanoseconds: UInt64 = 400_000_000
     private let flashFadeNanoseconds: UInt64 = 50_000_000
+    /// Points of vertical scroll per photo step (trackpad units).
+    private let scrollStepThreshold: CGFloat = 48
 
     var body: some View {
         GeometryReader { geo in
@@ -36,13 +43,14 @@ struct CoverFlowView: View {
                 if session.isPixelZoom {
                     pixelZoomOverlay(size: geo.size)
                 }
-                starFlashOverlay
-                    .allowsHitTesting(false)
                 previewLoadingChrome
                     .allowsHitTesting(false)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
+            .onHover { hovering in
+                isHoveringPhoto = hovering
+            }
             .overlay {
                 ZoomMouseTracker(
                     syncToken: zoomMouseSyncToken,
@@ -54,26 +62,47 @@ struct CoverFlowView: View {
                     }
                 )
             }
+            .background(
+                ScrollWheelMonitor { dx, dy, natural in
+                    handleScrollWheel(deltaX: dx, deltaY: dy, naturalScrolling: natural)
+                }
+            )
         }
         .onAppear {
             settledFlow = CGFloat(session.selectionIndex)
             displayedFlow = settledFlow
+            priorSelectionIndex = session.selectionIndex
             flipAnim = nil
             fanAnim = nil
             clockNow = Date()
-            reloadImages()
+            reloadImages(aheadBias: 0)
+        }
+        .onChange(of: previews.viewportRevision) { _, _ in
+            // Drop IDs that painted; never keep waiting state for photos outside the stage.
+            prunePendingPreviewIDs()
         }
         .onChange(of: session.selectionIndex) { _, newValue in
+            let delta = newValue - priorSelectionIndex
+            priorSelectionIndex = newValue
+            // Bias embed prefetch into the flip direction so forward coasts aren't blank.
+            let bias = delta > 0 ? 6 : (delta < 0 ? -6 : 0)
             if session.isCullBusy {
+                previews.endMotion()
                 settledFlow = CGFloat(newValue)
                 displayedFlow = settledFlow
                 flipAnim = nil
+                reloadImages(aheadBias: bias)
+                session.flashRating(at: newValue)
             } else {
+                // Pause demosaic / soft→full upgrades for the multi-flip burst, but still
+                // sync warm RAM into viewport so newly visible cards aren't blank.
+                previews.beginMotion()
                 retargetFlow(to: CGFloat(newValue))
+                session.flashRating(at: newValue)
+                reloadImages(aheadBias: bias)
             }
-            reloadImages()
-            if session.isPixelZoom, let photo = session.currentPhoto {
-                previews.request(photo, priority: .focused)
+            if session.isPixelZoom, flipAnim == nil, let photo = session.currentPhoto {
+                previews.requestFullResolution(photo)
             }
         }
         .onChange(of: session.activePhotos.map(\.id)) { oldIDs, newIDs in
@@ -82,7 +111,8 @@ struct CoverFlowView: View {
             settledFlow = CGFloat(min(session.selectionIndex, maxIndex))
             displayedFlow = settledFlow
             flipAnim = nil
-            reloadImages()
+            priorSelectionIndex = session.selectionIndex
+            reloadImages(aheadBias: 0)
         }
         .onChange(of: session.fanInToken) { _, _ in
             fanAnim = CullClockAnim(from: 0, to: 1, start: Date(), duration: fanAnimDuration)
@@ -99,10 +129,10 @@ struct CoverFlowView: View {
             }
         }
         .onChange(of: session.departingCards.map(\.id)) { _, _ in
-            reloadImages()
+            reloadImages(aheadBias: 0)
         }
         .onChange(of: session.arrivingCards.map(\.id)) { _, _ in
-            reloadImages()
+            reloadImages(aheadBias: 0)
         }
         .onChange(of: session.starFlash) { _, flash in
             guard let flash else { return }
@@ -113,11 +143,14 @@ struct CoverFlowView: View {
     private var zoomMouseSyncToken: String {
         let photoID = session.currentPhoto?.id ?? ""
         let hasBitmap = session.currentPhoto.map { zoomImage(for: $0) != nil } ?? false
-        return "\(session.isPixelZoom)-\(photoID)-\(hasBitmap)-\(previews.viewportRevision)"
+        let loading = session.currentPhoto.map { previews.isLoadingFullResolution($0) } ?? false
+        return "\(session.isPixelZoom)-\(photoID)-\(hasBitmap)-\(loading)-\(previews.viewportRevision)-\(previews.fullResolutionRevision)"
     }
 
     private func zoomImage(for photo: PhotoItem) -> NSImage? {
-        previews.viewportImages[photo.id] ?? previews.image(for: photo)
+        previews.fullImage(for: photo)
+            ?? previews.viewportImages[photo.id]
+            ?? previews.displayImage(for: photo)
     }
 
     private var previewLoadingChrome: some View {
@@ -143,6 +176,7 @@ struct CoverFlowView: View {
         }
     }
 
+    /// Stars sit at the bottom of the focus frame (not screen-center).
     private var starFlashOverlay: some View {
         // Keep the view mounted while opacity animates — gating on opacity removes it
         // instantly and looks like a blink instead of a fade.
@@ -154,7 +188,55 @@ struct CoverFlowView: View {
                     .background(.ultraThinMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .opacity(flashOpacity)
+                    .padding(.bottom, 18)
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .allowsHitTesting(false)
+    }
+
+    /// Hover chrome: clickable stars (click current rating to clear).
+    private var hoverStarBar: some View {
+        let rating = session.ratingForCurrentPhoto()
+        return InteractiveStarRow(
+            rating: rating,
+            maxStars: StarRating.maxStars,
+            onPick: { session.toggleOrSetRating($0) }
+        )
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.bottom, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .opacity(isHoveringPhoto ? 1 : 0)
+        .allowsHitTesting(isHoveringPhoto)
+        .animation(.easeOut(duration: 0.12), value: isHoveringPhoto)
+    }
+
+    private func handleScrollWheel(deltaX: CGFloat, deltaY: CGFloat, naturalScrolling: Bool) {
+        guard !session.isCullBusy, !session.activePhotos.isEmpty else { return }
+        // Vertical only — horizontal scroll ignored (felt bad as dual-axis).
+        guard abs(deltaY) >= abs(deltaX) else { return }
+        guard abs(deltaY) > 0.25 else { return }
+
+        // Match System Settings → Trackpad → Natural scrolling.
+        // Positive debt = toward next photo.
+        let signed = naturalScrolling ? -deltaY : deltaY
+        scrollDebt += signed
+
+        // Drain debt into photo steps — momentum events keep arriving after finger lift,
+        // so coasting comes from AppKit for free (no custom physics).
+        let step = scrollStepThreshold
+        while scrollDebt >= step {
+            scrollDebt -= step
+            session.goNext()
+            if session.isCullBusy { break }
+        }
+        while scrollDebt <= -step {
+            scrollDebt += step
+            session.goPrevious()
+            if session.isCullBusy { break }
         }
     }
 
@@ -227,24 +309,54 @@ struct CoverFlowView: View {
                     flowPosition: displayedFlow,
                     photos: session.activePhotos,
                     images: previews.viewportImages,
-                    previewEpoch: previews.viewportRevision,
+                    previewEpoch: previews.viewportRevision &+ session.previewTick,
                     enhancingPhotoIDs: previews.enhancingPhotoIDs,
                     departingCards: session.departingCards,
                     arrivingCards: session.arrivingCards,
-                    focusID: session.currentPhoto?.id,
+                    // Follow the visual center while coasting — selection can already be
+                    // at first/last while displayedFlow is still catching up.
+                    focusID: visualFocusID,
                     departingFromCenter: session.isDepartingFromCenter,
+                    // Keep center frame fixed on normal flips; deck slides behind it.
+                    pinnedFocus: !session.isDepartingFromCenter,
                     fanStableIDs: session.fanStableIDs,
                     fanFromOffsets: session.fanFromOffsets,
                     fanArmed: session.fanArmed,
                     cullReversed: session.cullReversed,
+                    showEnhanceBadge: flipAnim == nil,
                     fanClock: fanAnim.map { (start: $0.start, duration: $0.duration) },
                     liftClock: liftAnim.map { (start: $0.start, duration: $0.duration) },
                     now: clockNow,
                     layout: layout,
                     sideCount: sideCount,
-                    onSelectIndex: { session.select(index: $0) }
+                    onSelectIndex: { index in
+                        if index == session.selectionIndex {
+                            session.togglePixelZoom()
+                        } else {
+                            session.select(index: index)
+                        }
+                    },
+                    onDoubleTapIndex: { index in
+                        if index == session.selectionIndex {
+                            session.toggleFilterRelativeRating()
+                        } else {
+                            session.select(index: index)
+                        }
+                    }
                 )
                 .transaction { $0.animation = nil }
+
+                // Stars anchored to the focus card footprint.
+                ZStack {
+                    starFlashOverlay
+                        .opacity(isHoveringPhoto ? 0 : 1)
+                        .allowsHitTesting(false)
+                    hoverStarBar
+                }
+                .frame(
+                    width: layout.centerSlot * layout.focusScale,
+                    height: layout.centerSlot * layout.focusScale
+                )
 
                 TimelineView(
                     .animation(minimumInterval: 1.0 / 60.0, paused: !clockRunning)
@@ -280,16 +392,28 @@ struct CoverFlowView: View {
     private func pixelZoomOverlay(size: CGSize) -> some View {
         let photo = session.currentPhoto
         let image = photo.flatMap { zoomImage(for: $0) }
+        let loadingFull = photo.map { previews.isLoadingFullResolution($0) } ?? false
         return ZStack {
             Color.black
             if let image {
-                let pixels = PreviewService.pixelSize(image)
+                let bitmapPixels = PreviewService.pixelSize(image)
+                // Upscale the current bitmap to full-res *long edge* while keeping its aspect
+                // ratio — never force native WxH onto a differently oriented proxy (that skews).
+                let layoutPixels: (width: Int, height: Int) = {
+                    if let photo, previews.fullImage(for: photo) != nil {
+                        return bitmapPixels
+                    }
+                    guard let photo,
+                          let native = previews.fullPixelSize(for: photo)
+                    else { return bitmapPixels }
+                    return Self.zoomLayoutSize(bitmap: bitmapPixels, native: native)
+                }()
                 let backing = NSScreen.main?.backingScaleFactor ?? 2
                 let scale = 1.0 / max(backing, 1)
-                // 1 image pixel = 1 device pixel.
+                // 1 image pixel = 1 device pixel (using full-res layout size).
                 let display = CGSize(
-                    width: CGFloat(pixels.width) * scale,
-                    height: CGFloat(pixels.height) * scale
+                    width: CGFloat(layoutPixels.width) * scale,
+                    height: CGFloat(layoutPixels.height) * scale
                 )
                 let fx = min(1, max(0, zoomMouseFraction.x))
                 let fy = min(1, max(0, zoomMouseFraction.y))
@@ -298,7 +422,7 @@ struct CoverFlowView: View {
 
                 Image(nsImage: image)
                     .resizable()
-                    .interpolation(.high)
+                    .interpolation(loadingFull ? .medium : .high)
                     .frame(width: display.width, height: display.height)
                     .position(
                         x: originX + display.width / 2,
@@ -312,14 +436,42 @@ struct CoverFlowView: View {
                     .tint(.white)
             }
 
-            if let photo, previews.enhancingPhotoIDs.contains(photo.id) {
+            if loadingFull {
                 EnhanceQualityBadge()
                     .padding(14)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .allowsHitTesting(false)
             }
+
+            // Tap target under star chrome so star buttons still receive clicks.
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    session.toggleFilterRelativeRating()
+                }
+                .onTapGesture(count: 1) {
+                    session.togglePixelZoom()
+                }
+
+            hoverStarBar
+                .frame(width: size.width, height: size.height)
         }
         .frame(width: size.width, height: size.height)
-        .contentShape(Rectangle())
+    }
+
+    /// Full-res layout size for a proxy bitmap: same aspect as the bitmap, long edge = native.
+    private static func zoomLayoutSize(
+        bitmap: (width: Int, height: Int),
+        native: (width: Int, height: Int)
+    ) -> (width: Int, height: Int) {
+        let bitmapLong = max(bitmap.width, bitmap.height)
+        guard bitmapLong > 0 else { return bitmap }
+        let targetLong = max(native.width, native.height)
+        let s = CGFloat(targetLong) / CGFloat(bitmapLong)
+        return (
+            max(1, Int((CGFloat(bitmap.width) * s).rounded())),
+            max(1, Int((CGFloat(bitmap.height) * s).rounded()))
+        )
     }
 
     private var flipDrag: some Gesture {
@@ -336,6 +488,20 @@ struct CoverFlowView: View {
                     session.goLayerUp()
                 }
             }
+    }
+
+    /// Photo under the visual center. During a flip this tracks `displayedFlow`, not
+    /// `selectionIndex`, so a fast run to either end doesn't pin the destination early.
+    private var visualFocusID: String? {
+        let photos = session.activePhotos
+        guard !photos.isEmpty else { return nil }
+        let idx: Int
+        if flipAnim != nil {
+            idx = Int(displayedFlow.rounded())
+        } else {
+            idx = session.selectionIndex
+        }
+        return photos[min(max(0, idx), photos.count - 1)].id
     }
 
     /// Sample the live (possibly mid-flight) position, then retarget.
@@ -364,6 +530,11 @@ struct CoverFlowView: View {
         settledFlow = flipAnim.to
         displayedFlow = flipAnim.to
         self.flipAnim = nil
+        previews.endMotion()
+        reloadImages(aheadBias: 0)
+        if session.isPixelZoom, let photo = session.currentPhoto {
+            previews.requestFullResolution(photo)
+        }
     }
 
     private func finishFanIfNeeded(at date: Date) {
@@ -379,45 +550,81 @@ struct CoverFlowView: View {
         }
     }
 
-    private func reloadImages() {
+    private func reloadImages(aheadBias: Int) {
         if session.activePhotos.isEmpty && session.departingCards.isEmpty && session.arrivingCards.isEmpty {
             previews.clearViewport()
             pendingPreviewIDs = []
             return
         }
 
+        // Rebuild waiting set each pass — cancelled/in-flight embeds must not leak the chrome.
+        var waiting = Set<String>()
+
         if !session.activePhotos.isEmpty {
             let center = session.selectionIndex
+            // Visible cards first (sync warm RAM → viewport), then direction-biased prefetch.
             let start = max(0, center - sideCount - 2)
             let end = min(session.activePhotos.count - 1, center + sideCount + 2)
 
             for i in start...end {
                 let photo = session.activePhotos[i]
-                loadImage(for: photo, priority: i == center ? .focused : .normal)
+                loadImage(for: photo, priority: i == center ? .focused : .normal, waiting: &waiting)
             }
 
-            session.previews.prefetch(around: center, in: session.activePhotos, radius: sideCount + 6)
+            session.previews.prefetch(
+                around: center,
+                in: session.activePhotos,
+                radius: sideCount + 3,
+                aheadBias: aheadBias
+            )
         }
 
+        // Leavers: paint from RAM only — never request or count toward "Loading previews…".
         for card in session.departingCards {
-            loadImage(for: card.photo, priority: .normal)
+            if let display = session.previews.displayImage(for: card.photo) {
+                previews.setViewportImage(display, for: card.photo.id)
+            }
         }
         for card in session.arrivingCards {
-            loadImage(for: card.photo, priority: .normal)
+            loadImage(for: card.photo, priority: .normal, waiting: &waiting)
         }
+
+        pendingPreviewIDs = waiting
     }
 
-    private func loadImage(for photo: PhotoItem, priority: PreviewPriority) {
-        if let cached = session.previews.image(for: photo) {
-            previews.setViewportImage(cached, for: photo.id)
-            pendingPreviewIDs.remove(photo.id)
+    private func prunePendingPreviewIDs() {
+        guard !pendingPreviewIDs.isEmpty else { return }
+        let stageIDs = stagePhotoIDs()
+        pendingPreviewIDs = Set(pendingPreviewIDs.filter { id in
+            stageIDs.contains(id) && previews.viewportImages[id] == nil
+        })
+    }
+
+    private func stagePhotoIDs() -> Set<String> {
+        var ids = Set<String>()
+        if !session.activePhotos.isEmpty {
+            let center = session.selectionIndex
+            let start = max(0, center - sideCount - 2)
+            let end = min(session.activePhotos.count - 1, center + sideCount + 2)
+            for i in start...end {
+                ids.insert(session.activePhotos[i].id)
+            }
+        }
+        // Departing cards never belong in the loading chrome.
+        for card in session.arrivingCards { ids.insert(card.photo.id) }
+        return ids
+    }
+
+    private func loadImage(for photo: PhotoItem, priority: PreviewPriority, waiting: inout Set<String>) {
+        if let display = session.previews.displayImage(for: photo) {
+            // Rendered proxy when ready (same look for focus + neighbors); else embedded placeholder.
+            previews.setViewportImage(display, for: photo.id)
         } else if previews.viewportImages[photo.id] == nil {
-            pendingPreviewIDs.insert(photo.id)
+            waiting.insert(photo.id)
         }
 
-        session.previews.request(photo, priority: priority) { _ in
-            pendingPreviewIDs.remove(photo.id)
-        }
+        // Completion may never run (cancelled / already in-flight) — waiting set is rebuilt on reload.
+        session.previews.request(photo, priority: priority, completion: nil)
     }
 }
 
@@ -433,6 +640,30 @@ private struct StarRow: View {
                 Image(systemName: star <= rating ? "star.fill" : "star")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(.primary)
+            }
+        }
+    }
+}
+
+private struct InteractiveStarRow: View {
+    let rating: Int
+    let maxStars: Int
+    let onPick: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(1...maxStars, id: \.self) { star in
+                Button {
+                    onPick(star)
+                } label: {
+                    Image(systemName: star <= rating ? "star.fill" : "star")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(star == rating ? "Clear rating" : "Rate \(star)★")
             }
         }
     }
@@ -562,10 +793,14 @@ private struct CoverFlowStage: View {
     let focusID: String?
     /// Old L0 is flying out — new focus should slide L1→center with that lift.
     let departingFromCenter: Bool
+    /// When true, center photo stays fixed and swaps instantly; deck slides behind.
+    let pinnedFocus: Bool
     let fanStableIDs: Set<String>
     let fanFromOffsets: [String: CGFloat]
     let fanArmed: Bool
     let cullReversed: Bool
+    /// Hide enhance chrome while Cover Flow is mid-slide.
+    let showEnhanceBadge: Bool
     /// Fan clock: discard L1→L2, restore L2→L1.
     let fanClock: (start: Date, duration: TimeInterval)?
     let liftClock: (start: Date, duration: TimeInterval)?
@@ -573,11 +808,17 @@ private struct CoverFlowStage: View {
     let layout: CoverFlowLayout
     let sideCount: Int
     let onSelectIndex: (Int) -> Void
+    var onDoubleTapIndex: ((Int) -> Void)? = nil
 
     /// Lift travel — far enough to clear the stage before fade.
     private var liftDistance: CGFloat { layout.centerSlot * 0.95 }
 
     private var arrivingIDs: Set<String> { Set(arrivingCards.map(\.id)) }
+
+    private var pinnedFocusPhoto: PhotoItem? {
+        guard pinnedFocus, let focusID else { return nil }
+        return photos.first { $0.id == focusID }
+    }
 
     var body: some View {
         // Keep revision in the body graph so soft→full swaps still redraw without remounting Images.
@@ -585,23 +826,36 @@ private struct CoverFlowStage: View {
         ZStack {
             Color.black
 
+            // Pinned overlay only when the new focus already has pixels. Otherwise its gray
+            // placeholder would cover the outgoing deck card (instant blank on every cold flip).
+            let pinnedHasImage = pinnedFocusPhoto.map { images[$0.id] != nil } ?? false
+
             ForEach(drawnIndices, id: \.self) { index in
                 let photo = photos[index]
                 if arrivingIDs.contains(photo.id) {
                     EmptyView()
                 } else {
                     let offset = CGFloat(index) - flowPosition
-                    coverCard(
-                        photo: photo,
-                        index: index,
-                        offset: offset,
-                        lifting: false,
-                        liftReversed: false,
-                        skipGrayLift: false,
-                        fanStable: fanStableIDs.contains(photo.id),
-                        fromOffset: fanFromOffsets[photo.id],
-                        focusHandoff: departingFromCenter && photo.id == focusID
-                    )
+                    // Pinned focus is drawn as a fixed overlay — hide its deck copy near center
+                    // so it doesn't slide. Neighbors (including the photo leaving center) still move.
+                    let hideUnderPin = pinnedHasImage
+                        && photo.id == focusID
+                        && abs(offset) < 0.55
+                    if hideUnderPin {
+                        EmptyView()
+                    } else {
+                        coverCard(
+                            photo: photo,
+                            index: index,
+                            offset: offset,
+                            lifting: false,
+                            liftReversed: false,
+                            skipGrayLift: false,
+                            fanStable: fanStableIDs.contains(photo.id),
+                            fromOffset: fanFromOffsets[photo.id],
+                            focusHandoff: departingFromCenter && photo.id == focusID
+                        )
+                    }
                 }
             }
 
@@ -631,6 +885,12 @@ private struct CoverFlowStage: View {
                     fromOffset: nil,
                     focusHandoff: false
                 )
+            }
+
+            if pinnedHasImage,
+               let photo = pinnedFocusPhoto,
+               let index = photos.firstIndex(where: { $0.id == photo.id }) {
+                pinnedFocusCard(photo: photo, index: index)
             }
         }
     }
@@ -808,6 +1068,53 @@ private struct CoverFlowStage: View {
     }
 
     @ViewBuilder
+    private func pinnedFocusCard(photo: PhotoItem, index: Int) -> some View {
+        let image = images[photo.id]
+        let maxSize = CGSize(width: layout.centerSlot, height: layout.centerSlot)
+        let cardSize = fittedSize(for: image, in: maxSize)
+        let cornerRadius: CGFloat = 6
+
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(Color(white: 0.14))
+                .frame(width: cardSize.width, height: cardSize.height)
+
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: cardSize.width, height: cardSize.height)
+                    .id("\(photo.id)-pinned-ready")
+                    .transaction { $0.animation = nil }
+            }
+
+            if showEnhanceBadge, enhancingPhotoIDs.contains(photo.id) {
+                EnhanceQualityBadge()
+                    .padding(10)
+                    .frame(width: cardSize.width, height: cardSize.height, alignment: .bottomLeading)
+            }
+        }
+        .frame(width: cardSize.width, height: cardSize.height)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .frame(width: maxSize.width, height: maxSize.height, alignment: .center)
+        .scaleEffect(layout.focusScale, anchor: .center)
+        .zIndex(120)
+        .shadow(color: .black.opacity(1), radius: 96, y: 22)
+        .onTapGesture(count: 2) {
+            if let onDoubleTapIndex {
+                onDoubleTapIndex(index)
+            } else {
+                onSelectIndex(index)
+            }
+        }
+        .onTapGesture(count: 1) {
+            onSelectIndex(index)
+        }
+        .accessibilityLabel(photo.fileName)
+        .transaction { $0.animation = nil }
+    }
+
+    @ViewBuilder
     private func coverCard(
         photo: PhotoItem,
         index: Int,
@@ -870,13 +1177,13 @@ private struct CoverFlowStage: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: cardSize.width, height: cardSize.height)
-                    // Stable id — tying this to previewEpoch/pixel edge remounted every
-                    // card on soft→full and killed the in-flight flip animation.
-                    .id(photo.id)
+                    // Remount only when pixels first appear (nil→image). Soft→full keeps this
+                    // id so in-flight flip isn't reset; previewEpoch in body still refreshes bits.
+                    .id("\(photo.id)-ready")
                     .transaction { $0.animation = nil }
             }
 
-            if isCenter, enhancingPhotoIDs.contains(photo.id) {
+            if isCenter, showEnhanceBadge, enhancingPhotoIDs.contains(photo.id) {
                 EnhanceQualityBadge()
                     .padding(10)
                     .frame(width: cardSize.width, height: cardSize.height, alignment: .bottomLeading)
@@ -911,7 +1218,16 @@ private struct CoverFlowStage: View {
             y: 22 * shadowStrength(absOffset: poseA)
         )
         .allowsHitTesting(lift.opacity > 0.05 && !lifting)
-        .onTapGesture { onSelectIndex(index) }
+        .onTapGesture(count: 2) {
+            if let onDoubleTapIndex {
+                onDoubleTapIndex(index)
+            } else {
+                onSelectIndex(index)
+            }
+        }
+        .onTapGesture(count: 1) {
+            onSelectIndex(index)
+        }
         .accessibilityLabel(photo.fileName)
     }
 
@@ -933,9 +1249,50 @@ private struct CoverFlowStage: View {
     }
 }
 
+/// Local scroll-wheel monitor — receives deltas without stealing click hit-testing.
+private struct ScrollWheelMonitor: NSViewRepresentable {
+    /// deltaX, deltaY, naturalScrolling (`event.isDirectionInvertedFromDevice`).
+    var onScroll: (CGFloat, CGFloat, Bool) -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView()
+        view.onScroll = onScroll
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.onScroll = onScroll
+    }
+
+    final class MonitorView: NSView {
+        var onScroll: ((CGFloat, CGFloat, Bool) -> Void)?
+        /// Event monitor token — torn down in `viewDidMoveToWindow` when detached.
+        nonisolated(unsafe) private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                self?.onScroll?(
+                    event.scrollingDeltaX,
+                    event.scrollingDeltaY,
+                    event.isDirectionInvertedFromDevice
+                )
+                return event
+            }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
 /// AppKit mouse tracking — SwiftUI `onContinuousHover` only updates while moving,
 /// so next-photo while zoomed would keep a stale / center pan until the first move.
-private struct ZoomMouseTracker: NSViewRepresentable {
+struct ZoomMouseTracker: NSViewRepresentable {
     var syncToken: String
     var onFraction: (CGPoint) -> Void
 

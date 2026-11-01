@@ -55,6 +55,11 @@ final class RatingStore: ObservableObject {
             ratings[photo.id] = clamped
         }
         scheduleSave()
+
+        let fileURL = photo.url
+        Task.detached(priority: .utility) {
+            FinderStarTags.apply(stars: clamped, to: fileURL)
+        }
     }
 
     func counts(in photos: [PhotoItem]) -> (zero: Int, one: Int, two: Int, three: Int) {

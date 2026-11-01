@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -56,13 +57,69 @@ final class FlipSession: ObservableObject {
     @Published var isLoading = false
     /// Spacebar 1:1 pixel zoom with mouse-linked pan.
     @Published var isPixelZoom = false
+    /// Library (recents) sits above Flip.
+    @Published var isShowingLibrary = true
+    /// Grade single-image edit workspace.
+    @Published var isShowingGrade = false
+    /// Live recipe for the photo currently in Grade.
+    @Published var gradeRecipe: EditRecipe = .identity
+    /// As-shot Kelvin for the photo in Grade (Temperature slider baseline).
+    @Published var asShotKelvin: Double = WhiteBalanceLimits.defaultAsShotKelvin
+    /// As-shot tint for CIRAW neutralTint (kept when only Temperature moves).
+    @Published var asShotTint: Double = WhiteBalanceLimits.defaultAsShotTint
+    @Published var developColorMode: DevelopColorMode = DevelopPrefs.colorMode {
+        didSet { DevelopPrefs.colorMode = developColorMode }
+    }
+    /// CIRAW global tone curve (app-wide, with Lab/RGB). 0 = soft/linear, 1 = full punch.
+    @Published var developBaseBoost: Double = DevelopPrefs.baseBoost {
+        didSet {
+            let clamped = min(
+                DevelopPrefs.baseBoostRange.upperBound,
+                max(DevelopPrefs.baseBoostRange.lowerBound, developBaseBoost)
+            )
+            if abs(clamped - developBaseBoost) > 0.0001 {
+                developBaseBoost = clamped
+                return
+            }
+            DevelopPrefs.baseBoost = clamped
+            // Only bust demosaic caches when Base actually moves — then re-request
+            // the focused photo so Grade/Cover Flow aren’t left with an empty viewport.
+            if abs(oldValue - clamped) > 0.0001 {
+                previews.invalidate()
+                if let photo = currentPhoto {
+                    previews.request(photo, priority: .focused)
+                }
+            }
+        }
+    }
+
+    /// Reset Grade recipe + app develop prefs (tone mode, base boost) to defaults.
+    func resetGradeDefaults() {
+        developColorMode = .lab
+        developBaseBoost = DevelopPrefs.defaultBaseBoost
+        gradeRecipe = .identity
+        if let photo = currentPhoto {
+            recipeStore.setRecipe(.identity, for: photo)
+        }
+    }
 
     let ratingStore = RatingStore()
+    let recipeStore = RecipeStore()
     let previews = PreviewService.shared
     let latency = LatencyProbe.shared
+    let recents = RecentFoldersStore()
+    /// Mirrors preview paints so Cover Flow redraws while idle (Drive hydrate).
+    @Published private(set) var previewTick: UInt64 = 0
 
     private var liftTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
+    private var previewObservation: AnyCancellable?
+    private var recentsObservation: AnyCancellable?
+    private var recipesObservation: AnyCancellable?
+    private var recentThumbTask: Task<Void, Never>?
+    /// Only animate cull cards within this many slots of focus — off-stage leavers/arrivals snap.
+    /// (Filter-down from ALL used to build hundreds of lift views and wedge the UI.)
+    private let cullAnimRadius = 3
     /// Gray hold + slide + fade-at-top for leavers / reverse drop-in.
     private let liftDuration: Duration = .milliseconds(240)
     /// L1 then L2 (or reverse L2 then L1).
@@ -71,6 +128,27 @@ final class FlipSession: ObservableObject {
     var currentPhoto: PhotoItem? {
         guard activePhotos.indices.contains(selectionIndex) else { return nil }
         return activePhotos[selectionIndex]
+    }
+
+    init() {
+        // PreviewService paints don't touch FlipSession @Published fields; forward so
+        // Cover Flow redraws while sitting idle (Google Drive hydrate).
+        previewObservation = previews.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in
+                self?.previewTick &+= 1
+            }
+        }
+        // Nested ObservableObject — forward so LibraryView refreshes thumbs/counts.
+        recentsObservation = recents.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in
+                self?.objectWillChange.send()
+            }
+        }
+        recipesObservation = recipeStore.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in
+                self?.objectWillChange.send()
+            }
+        }
     }
 
     /// True while a former focus is flying out from screen center — keep camera there.
@@ -103,50 +181,86 @@ final class FlipSession: ObservableObject {
         loadFolder(url)
     }
 
+    /// Launch: stay on the library. Recents already migrated/loaded in `RecentFoldersStore`.
+    func prepareLibrary() {
+        isShowingLibrary = true
+        isLoading = false
+        if recents.folders.isEmpty {
+            statusMessage = "Open a folder of photos to start culling."
+        } else {
+            statusMessage = "Pick a recent folder or open a new one."
+        }
+    }
+
+    func openRecent(_ record: RecentFolderRecord) {
+        guard let url = recents.resolveURL(for: record) else {
+            statusMessage = "Can’t open \(record.displayName) — use Open Folder… (needed for Google Drive)."
+            return
+        }
+        Self.saveFolderAccess(url)
+        loadFolder(url)
+    }
+
+    func showLibrary() {
+        isPixelZoom = false
+        isShowingGrade = false
+        gradeRecipe = .identity
+        isShowingLibrary = true
+        loadTask?.cancel()
+        isLoading = false
+        photos = []
+        activePhotos = []
+        folderURL = nil
+        recipeStore.clear()
+        resetCullStateForNewFolder()
+        recents.load()
+        if recents.folders.isEmpty {
+            statusMessage = "Open a folder of photos to start culling."
+        } else {
+            statusMessage = "Pick a recent folder or open a new one."
+        }
+    }
+
+    func enterGrade() {
+        guard !isShowingLibrary, !isCullBusy, let photo = currentPhoto else { return }
+        isPixelZoom = false
+        gradeRecipe = recipeStore.recipe(for: photo)
+        refreshAsShotWhiteBalance(for: photo)
+        isShowingGrade = true
+        previews.request(photo, priority: .focused)
+    }
+
+    func exitGrade() {
+        guard isShowingGrade else { return }
+        isPixelZoom = false
+        isShowingGrade = false
+        gradeRecipe = .identity
+        asShotKelvin = WhiteBalanceLimits.defaultAsShotKelvin
+        asShotTint = WhiteBalanceLimits.defaultAsShotTint
+    }
+
+    func updateGradeRecipe(_ mutate: (inout EditRecipe) -> Void) {
+        guard let photo = currentPhoto else { return }
+        var next = gradeRecipe
+        mutate(&next)
+        gradeRecipe = next
+        recipeStore.setRecipe(next, for: photo)
+    }
+
+    func refreshAsShotWhiteBalance(for photo: PhotoItem) {
+        if let wb = RAWRender.asShotWhiteBalance(url: photo.url) {
+            asShotKelvin = wb.kelvin
+            asShotTint = wb.tint
+        } else {
+            asShotKelvin = WhiteBalanceLimits.defaultAsShotKelvin
+            asShotTint = WhiteBalanceLimits.defaultAsShotTint
+        }
+    }
+
     /// Launch restore. CloudStorage paths often hang without a user-granted Open Panel bookmark.
     func restoreFolderIfPossible() {
-        guard photos.isEmpty, !isLoading else { return }
-        isLoading = true
-        statusMessage = "Looking for photos…"
-
-        loadTask?.cancel()
-        let bookmarkData = UserDefaults.standard.data(forKey: Self.folderBookmarkKey)
-        let savedPath = UserDefaults.standard.string(forKey: Self.lastFolderPathKey)
-        let bakedPath = RepoPaths.defaultFolderPath
-
-        let diskLoad = Task.detached(priority: .userInitiated) {
-            Self.syncLoadFirstAvailableFolder(
-                bookmarkData: bookmarkData,
-                savedPath: savedPath,
-                bakedPath: bakedPath
-            )
-        }
-
-        loadTask = Task { @MainActor in
-            defer {
-                if Task.isCancelled, self.photos.isEmpty, self.isLoading {
-                    self.isLoading = false
-                    self.statusMessage = "Open a folder of photos to start culling."
-                }
-            }
-
-            let outcome = await Self.race(diskLoad, timeoutSeconds: bookmarkData == nil ? 2 : 10)
-            guard !Task.isCancelled else { return }
-            self.applyOutcome(outcome)
-
-            if case .notFound = outcome {
-                // Don't block on a hung listing — if Drive responds later, take it.
-                Task { @MainActor in
-                    let late = await diskLoad.value
-                    guard self.photos.isEmpty else { return }
-                    if case .loaded = late {
-                        self.applyOutcome(late)
-                    }
-                }
-                // Do not auto-present Open Panel — that was added during the launch hang
-                // debugging and feels like a "permission regression" on every rebuild.
-            }
-        }
+        // Library-first: do not auto-enter Flip on launch.
+        prepareLibrary()
     }
 
     /// Nonisolated so the timeout/load waiters are not stuck behind MainActor.
@@ -300,6 +414,7 @@ final class FlipSession: ObservableObject {
     func loadFolder(_ url: URL) {
         loadTask?.cancel()
         isLoading = true
+        isShowingLibrary = true // keep library visible with spinner until loaded
         statusMessage = "Loading \(url.lastPathComponent)…"
         resetCullStateForNewFolder()
         _ = url.startAccessingSecurityScopedResource()
@@ -334,26 +449,80 @@ final class FlipSession: ObservableObject {
             photos = items
             ratingLayer = .all
             ratingStore.applyLoaded(ratings: ratings, folder: url)
+            recipeStore.load(for: url)
+            isShowingGrade = false
+            gradeRecipe = .identity
             rebuildActivePhotos(preferringID: items.first?.id, fanIn: false)
             isLoading = false
+            isShowingLibrary = false
             Self.saveFolderAccess(url)
+            let ratedCount = ratings.values.filter { $0 > 0 }.count
+            recents.remember(url: url, photoCount: items.count, ratedCount: ratedCount, thumbnail: nil)
+            scheduleRecentThumbnail(url: url, photos: items, ratings: ratings, ratedCount: ratedCount)
             if items.isEmpty {
                 statusMessage = "No photos found in \(url.lastPathComponent)."
             } else {
                 statusMessage = "\(items.count) photos — ←/→ flip · 0–3 rate · ↑/↓ layers"
-                previews.prefetch(around: 0, in: activePhotos, radius: 4)
+                previews.prefetch(around: 0, in: activePhotos, radius: 2)
             }
         case .failed(let name, let message):
             isLoading = false
             photos = []
             activePhotos = []
+            isShowingLibrary = true
             statusMessage = "Could not open \(name): \(message)"
         case .notFound:
             isLoading = false
             photos = []
             activePhotos = []
+            isShowingLibrary = true
             statusMessage = "Open Folder… to choose photos (needed once for Google Drive)."
         }
+    }
+
+    /// Library thumb: first photo that has the highest star rating (else first photo).
+    private static func coverPhoto(in photos: [PhotoItem], ratings: [String: Int]) -> PhotoItem? {
+        guard !photos.isEmpty else { return nil }
+        let best = photos.map { ratings[$0.id] ?? 0 }.max() ?? 0
+        if best > 0 {
+            return photos.first { (ratings[$0.id] ?? 0) == best }
+        }
+        return photos.first
+    }
+
+    private func scheduleRecentThumbnail(
+        url: URL,
+        photos: [PhotoItem],
+        ratings: [String: Int],
+        ratedCount: Int
+    ) {
+        recentThumbTask?.cancel()
+        guard let cover = Self.coverPhoto(in: photos, ratings: ratings) else { return }
+        let photoURL = cover.url
+        recentThumbTask = Task.detached(priority: .utility) {
+            let thumb = PreviewService.decodeBestEmbeddedPublic(url: photoURL, maxPixelSize: 320)
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                self.recents.remember(
+                    url: url,
+                    photoCount: photos.count,
+                    ratedCount: ratedCount,
+                    thumbnail: thumb
+                )
+            }
+        }
+    }
+
+    private func touchRecentStats() {
+        guard let url = folderURL else { return }
+        let rated = ratingStore.ratings.values.filter { $0 > 0 }.count
+        recents.remember(url: url, photoCount: photos.count, ratedCount: rated, thumbnail: nil)
+        scheduleRecentThumbnail(
+            url: url,
+            photos: photos,
+            ratings: ratingStore.ratings,
+            ratedCount: rated
+        )
     }
 
     private func resetCullStateForNewFolder() {
@@ -380,8 +549,7 @@ final class FlipSession: ObservableObject {
         latency.beginFlip()
         selectionIndex = clamped
         latency.endFlip()
-        flashRating(at: clamped)
-        previews.prefetch(around: clamped, in: activePhotos)
+        // Rating flash + preview enhance are applied by Cover Flow after the slide settles.
     }
 
     func flashRating(at index: Int) {
@@ -396,7 +564,7 @@ final class FlipSession: ObservableObject {
         guard currentPhoto != nil else { return }
         isPixelZoom.toggle()
         if isPixelZoom, let photo = currentPhoto {
-            previews.request(photo, priority: .focused)
+            previews.requestFullResolution(photo)
         }
     }
 
@@ -406,6 +574,7 @@ final class FlipSession: ObservableObject {
         ratingStore.setRating(clamped, for: photo)
         objectWillChange.send()
         starFlash = .rating(clamped)
+        touchRecentStats()
 
         let meets = clamped >= ratingLayer.minimumRating
         if meets {
@@ -418,8 +587,39 @@ final class FlipSession: ObservableObject {
         beginLift(ids: [photo.id], thenRebuildPreferring: nextID, fanIn: true)
     }
 
+    /// Double-click: toggle between this filter’s floor and floor+1
+    /// (ALL → 0↔1, ≥1★ → 1↔2, ≥2★ → 2↔3, 3★ → 3↔0).
+    func toggleFilterRelativeRating() {
+        guard !isCullBusy, let photo = currentPhoto else { return }
+        let base = ratingLayer.minimumRating
+        let elevated = min(base + 1, StarRating.maxStars)
+        let current = ratingStore.rating(for: photo)
+        if base >= StarRating.maxStars {
+            rate(current == base ? 0 : base)
+        } else if current == elevated {
+            rate(base)
+        } else {
+            rate(elevated)
+        }
+    }
+
+    /// Hover star chrome: click star N to set N; click the current rating to clear (0).
+    func toggleOrSetRating(_ stars: Int) {
+        guard !isCullBusy, let photo = currentPhoto else { return }
+        let target = StarRating.clamp(stars)
+        let current = ratingStore.rating(for: photo)
+        rate(current == target ? 0 : target)
+    }
+
+    func ratingForCurrentPhoto() -> Int {
+        guard let photo = currentPhoto else { return 0 }
+        return ratingStore.rating(for: photo)
+    }
+
     func goLayerDown() {
-        guard !isCullBusy else { return }
+        // Interrupt in-flight cull so layer hops aren't dead while lift/fan plays out
+        // (and so a preview backlog can't strand isCullBusy).
+        interruptCullAnimation()
         var raw = ratingLayer.rawValue + 1
         while let next = RatingLayer(rawValue: raw) {
             if isReachableLayer(next) {
@@ -431,7 +631,7 @@ final class FlipSession: ObservableObject {
     }
 
     func goLayerUp() {
-        guard !isCullBusy else { return }
+        interruptCullAnimation()
         var raw = ratingLayer.rawValue - 1
         while let next = RatingLayer(rawValue: raw) {
             if isReachableLayer(next) {
@@ -443,8 +643,23 @@ final class FlipSession: ObservableObject {
     }
 
     func setLayer(_ layer: RatingLayer) {
-        guard !isCullBusy, layer != ratingLayer, isReachableLayer(layer) else { return }
+        guard layer != ratingLayer, isReachableLayer(layer) else { return }
+        interruptCullAnimation()
         hopToLayer(layer)
+    }
+
+    /// Snap out of lift/fan so a new layer hop (or navigation) can run immediately.
+    private func interruptCullAnimation() {
+        guard isCullBusy else { return }
+        liftTask?.cancel()
+        liftTask = nil
+        liftingIDs = []
+        departingCards = []
+        arrivingCards = []
+        cullReversed = false
+        fanArmed = false
+        fanStableIDs = []
+        fanFromOffsets = [:]
     }
 
     func clearFanArmed() {
@@ -478,12 +693,22 @@ final class FlipSession: ObservableObject {
         let leavingIDs = Set(activePhotos.map(\.id)).subtracting(filtered.map(\.id))
         let enteringIDs = Set(filtered.map(\.id)).subtracting(activePhotos.map(\.id))
 
+        // Abandon coasted-past embeds/demosaics so the layer animation and keys stay live.
+        let keepFocus = preferID.map { Set([$0]) } ?? []
+        previews.cancelNonEssentialWork(keeping: keepFocus)
+        previews.endMotion()
+
         starFlash = .layer(layer)
         ratingLayer = layer
 
         if !leavingIDs.isEmpty {
             cullReversed = false
-            beginLift(ids: leavingIDs, thenRebuildPreferring: preferID, fanIn: true)
+            // Animate only on-stage leavers; the rest vanish with the rebuild.
+            beginLift(
+                ids: stageAdjacentIDs(leavingIDs, in: activePhotos, focusIndex: selectionIndex),
+                thenRebuildPreferring: preferID,
+                fanIn: true
+            )
             return
         }
 
@@ -514,12 +739,15 @@ final class FlipSession: ObservableObject {
             }
             return min(selectionIndex, max(0, newList.count - 1))
         }()
-        arrivingCards = ids.compactMap { id in
+        // Only drop-in cards that land near focus — far arrivals are already in the deck.
+        arrivingCards = ids.compactMap { id -> DepartingCard? in
             guard let idx = newList.firstIndex(where: { $0.id == id }) else { return nil }
+            let offset = CGFloat(idx - focusIndex)
+            guard abs(offset) <= CGFloat(cullAnimRadius) else { return nil }
             return DepartingCard(
                 id: id,
                 photo: newList[idx],
-                offset: CGFloat(idx - focusIndex),
+                offset: offset,
                 skipGray: false
             )
         }
@@ -556,18 +784,20 @@ final class FlipSession: ObservableObject {
         cullReversed = false
         arrivingCards = []
 
-        // Freeze leavers relative to the current focus so a discarded center lifts from screen center.
+        // Freeze on-stage leavers relative to focus so a discarded center lifts from screen center.
         let focusIndex = selectionIndex
-        departingCards = ids.compactMap { id in
+        departingCards = ids.compactMap { id -> DepartingCard? in
             guard let idx = activePhotos.firstIndex(where: { $0.id == id }) else { return nil }
+            let offset = CGFloat(idx - focusIndex)
+            guard abs(offset) <= CGFloat(cullAnimRadius) else { return nil }
             return DepartingCard(
                 id: id,
                 photo: activePhotos[idx],
-                offset: CGFloat(idx - focusIndex),
+                offset: offset,
                 skipGray: false
             )
         }
-        liftingIDs = ids
+        liftingIDs = Set(departingCards.map(\.id))
         rebuildActivePhotos(preferringID: preferringID, fanIn: fanIn, startFanImmediately: false)
         previews.prefetch(around: selectionIndex, in: activePhotos)
 
@@ -589,6 +819,22 @@ final class FlipSession: ObservableObject {
                 self.fanFromOffsets = [:]
             }
         }
+    }
+
+    /// IDs among `candidates` that sit within `cullAnimRadius` of focus in `list`.
+    private func stageAdjacentIDs(_ candidates: Set<String>, in list: [PhotoItem], focusIndex: Int) -> Set<String> {
+        guard !list.isEmpty, !candidates.isEmpty else { return [] }
+        var result = Set<String>()
+        let lo = max(0, focusIndex - cullAnimRadius)
+        let hi = min(list.count - 1, focusIndex + cullAnimRadius)
+        guard lo <= hi else { return [] }
+        for idx in lo...hi {
+            let id = list[idx].id
+            if candidates.contains(id) {
+                result.insert(id)
+            }
+        }
+        return result
     }
 
     /// Nearest remaining neighbor after a removal; prefer left when both sides exist.
