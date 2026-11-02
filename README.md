@@ -8,7 +8,7 @@ Native macOS photo culling + grading.
 
 ## Download
 
-**[Flipgrade 0.3.3 for macOS](https://github.com/MRSallee/Flipgrade/releases/download/v0.3.3/Flipgrade-0.3.3.zip)** (Developer ID signed · arm64)
+**[Flipgrade 0.3.3 for macOS](https://github.com/MRSallee/Flipgrade/releases/tag/v0.3.3)** (Developer ID signed · arm64)
 
 Unzip, then right-click → **Open** the first time (not notarized yet). Requires macOS 14+.
 
