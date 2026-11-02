@@ -37,7 +37,7 @@ struct CoverFlowView: View {
             let textMaxWidth = max(0, focusLeft - 2 * inset)
 
             ZStack {
-                Color.black
+                FlipgradeColor.ink
                 stage(layout: layout, stageSize: stageSize)
                     .opacity(session.isPixelZoom ? 0 : 1)
                     .allowsHitTesting(!session.isPixelZoom)
@@ -169,26 +169,28 @@ struct CoverFlowView: View {
         let colWidth = max(0, textMaxWidth)
 
         return ZStack {
-            // Top-left — folder + active filter.
-            VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
-                if !folderName.isEmpty {
-                    Text(folderName)
-                        .font(FlipgradeFont.folder)
-                        .lineSpacing(FlipgradeFont.folderLineSpacing)
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+            // Top-left — folder + active filter (hidden in 1:1 preview).
+            if !session.isPixelZoom {
+                VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
+                    if !folderName.isEmpty {
+                        Text(folderName)
+                            .font(FlipgradeFont.folder)
+                            .lineSpacing(FlipgradeFont.folderLineSpacing)
+                            .foregroundStyle(FlipgradeColor.accent)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if session.ratingLayer == .all {
+                        StarRow(rating: 0, maxStars: StarRating.maxStars)
+                    } else {
+                        StarRow(rating: filterStars, maxStars: StarRating.maxStars)
+                    }
                 }
-                if session.ratingLayer == .all {
-                    StarRow(rating: 0, maxStars: StarRating.maxStars)
-                } else {
-                    StarRow(rating: filterStars, maxStars: StarRating.maxStars)
-                }
+                .frame(width: colWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(inset)
+                .allowsHitTesting(false)
             }
-            .frame(width: colWidth, alignment: .leading)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(inset)
-            .allowsHitTesting(false)
 
             // Bottom-left — file, capture date, rating (clickable).
             VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
@@ -199,7 +201,7 @@ struct CoverFlowView: View {
                     Text(dateText)
                         .font(FlipgradeFont.ui)
                         .lineSpacing(FlipgradeFont.lineSpacing)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(FlipgradeColor.paper)
                         .lineLimit(1)
                 }
                 InteractiveStarRow(
@@ -212,15 +214,15 @@ struct CoverFlowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             .padding(inset)
 
-            // Top-right — focused preview loading only.
+            // Bottom-right — focused preview loading only.
             VStack {
+                Spacer()
                 HStack {
                     Spacer()
                     if isFocusPreviewLoading {
                         EnhanceQualityBadge()
                     }
                 }
-                Spacer()
             }
             .padding(inset)
             .allowsHitTesting(false)
@@ -337,7 +339,7 @@ struct CoverFlowView: View {
         let image = photo.flatMap { zoomImage(for: $0) }
         let loadingFull = photo.map { previews.isLoadingFullResolution($0) } ?? false
         return ZStack {
-            Color.black
+            FlipgradeColor.ink
             if let image {
                 let bitmapPixels = PreviewService.pixelSize(image)
                 // Upscale the current bitmap to full-res *long edge* while keeping its aspect
@@ -376,7 +378,7 @@ struct CoverFlowView: View {
                     .transaction { $0.animation = nil }
             } else {
                 ProgressView()
-                    .tint(.white)
+                    .tint(FlipgradeColor.paper)
             }
 
 
@@ -573,8 +575,8 @@ private struct RevealInFinderLink: View {
         Text(title)
             .font(FlipgradeFont.ui)
             .lineSpacing(FlipgradeFont.lineSpacing)
-            .foregroundStyle(.white)
-            .underline(isHovering, color: .white)
+            .foregroundStyle(FlipgradeColor.paper)
+            .underline(isHovering, color: FlipgradeColor.paper)
             .lineLimit(1)
             .truncationMode(.middle)
             .contentShape(Rectangle())
@@ -605,7 +607,7 @@ private struct StarRow: View {
             ForEach(1...maxStars, id: \.self) { star in
                 Image(systemName: star <= rating ? "star.fill" : "star")
                     .font(.system(size: FlipgradeFont.size, weight: .regular))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(FlipgradeColor.accent)
             }
         }
         .frame(height: FlipgradeFont.lineHeight, alignment: .center)
@@ -625,7 +627,7 @@ private struct InteractiveStarRow: View {
                 } label: {
                     Image(systemName: star <= rating ? "star.fill" : "star")
                         .font(.system(size: FlipgradeFont.size, weight: .regular))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(FlipgradeColor.paper)
                         .frame(width: FlipgradeFont.lineHeight, height: FlipgradeFont.lineHeight)
                         .contentShape(Rectangle())
                 }
@@ -649,9 +651,9 @@ private struct EnhanceQualityBadge: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .strokeBorder(Color.white.opacity(0.95), lineWidth: 1.2)
+                        .strokeBorder(FlipgradeColor.paper.opacity(0.95), lineWidth: 1.2)
                     Capsule()
-                        .fill(Color.white)
+                        .fill(FlipgradeColor.paper)
                         .frame(width: max(5, (geo.size.width - 3) * fill))
                         .padding(1.5)
                 }
@@ -659,7 +661,7 @@ private struct EnhanceQualityBadge: View {
             .frame(width: 78, height: 7)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .background(FlipgradeColor.ink.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .accessibilityLabel("Building higher quality preview")
     }
@@ -813,7 +815,7 @@ private struct CoverFlowStage: View {
         // Keep revision in the body graph so soft→full swaps still redraw without remounting Images.
         let _ = previewEpoch
         ZStack {
-            Color.black
+            FlipgradeColor.ink
 
             // Pinned overlay only when the new focus already has pixels. Otherwise its gray
             // placeholder would cover the outgoing deck card (instant blank on every cold flip).
@@ -1083,7 +1085,7 @@ private struct CoverFlowStage: View {
         return min(0.98, max(0.02, (outer - upperOuterEdge) / span))
     }
 
-    private static let focusStroke = Color(red: 0x66 / 255, green: 0x66 / 255, blue: 0x66 / 255)
+    private static let focusStroke = FlipgradeColor.border
 
     /// Occlusion wash: 30% at the outer peek → 90% from the upper-layer edge inward.
     @ViewBuilder
@@ -1096,9 +1098,9 @@ private struct CoverFlowStage: View {
         let stop = occlusionOverlapLocation(offset: offset, scale: scale, cardWidth: cardWidth)
         LinearGradient(
             stops: [
-                .init(color: .black.opacity(0.30), location: 0),
-                .init(color: .black.opacity(0.90), location: stop),
-                .init(color: .black.opacity(0.90), location: 1)
+                .init(color: FlipgradeColor.ink.opacity(0.30), location: 0),
+                .init(color: FlipgradeColor.ink.opacity(0.90), location: stop),
+                .init(color: FlipgradeColor.ink.opacity(0.90), location: 1)
             ],
             startPoint: outerIsLeading ? .leading : .trailing,
             endPoint: outerIsLeading ? .trailing : .leading
@@ -1114,7 +1116,7 @@ private struct CoverFlowStage: View {
 
         ZStack {
             Rectangle()
-                .fill(Color(white: 0.14))
+                .fill(FlipgradeColor.surface)
                 .frame(width: cardSize.width, height: cardSize.height)
 
             if let image {
@@ -1211,7 +1213,7 @@ private struct CoverFlowStage: View {
         ZStack {
             // Dark placeholder while Drive/ImageIO hydrate the embedded preview.
             Rectangle()
-                .fill(Color(white: 0.14))
+                .fill(FlipgradeColor.surface)
                 .frame(width: cardSize.width, height: cardSize.height)
 
             if let image {

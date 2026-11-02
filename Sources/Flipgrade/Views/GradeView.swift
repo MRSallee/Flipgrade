@@ -91,7 +91,7 @@ struct GradeView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black
+                FlipgradeColor.ink
 
                 if session.isPixelZoom {
                     zoomLayer(size: geo.size)
@@ -224,7 +224,7 @@ struct GradeView: View {
     private var fitImageStage: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black
+                FlipgradeColor.ink
                 if let image = displayedFitImage {
                     Image(nsImage: image)
                         .resizable()
@@ -233,7 +233,7 @@ struct GradeView: View {
                         .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
                 } else {
                     ProgressView()
-                        .tint(.white)
+                        .tint(FlipgradeColor.paper)
                 }
             }
         }
@@ -279,7 +279,7 @@ struct GradeView: View {
             return developedFull ?? developedFit ?? sourceFitImage
         }()
         return ZStack {
-            Color.black
+            FlipgradeColor.ink
             if let image {
                 let pixels = PreviewService.pixelSize(image)
                 let layout: (width: Int, height: Int) = {
@@ -313,7 +313,7 @@ struct GradeView: View {
                     .id("grade-zoom-\(session.currentPhoto?.id ?? "")-\(hsDebugStage.rawValue)")
                     .transaction { $0.animation = nil }
             } else {
-                ProgressView().tint(.white)
+                ProgressView().tint(FlipgradeColor.paper)
             }
         }
         .frame(width: size.width, height: size.height)
@@ -324,7 +324,7 @@ struct GradeView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text(session.currentPhoto?.fileName ?? "Grade")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(FlipgradeColor.paper.opacity(0.85))
                 .lineLimit(2)
 
             Picker("", selection: Binding(
@@ -338,7 +338,7 @@ struct GradeView: View {
 
             Text(session.developColorMode.label)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(FlipgradeColor.paper.opacity(0.4))
 
             slider(
                 "Base",
@@ -428,7 +428,7 @@ struct GradeView: View {
             }
             .buttonStyle(.plain)
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(FlipgradeColor.paper.opacity(0.55))
 
             Spacer(minLength: 0)
         }
@@ -436,7 +436,7 @@ struct GradeView: View {
         .frame(width: inspectorWidth)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(white: 0.12).opacity(session.isPixelZoom ? 0.92 : 1))
+                .fill(FlipgradeColor.surface.opacity(session.isPixelZoom ? 0.92 : 1))
         )
     }
 
@@ -450,11 +450,11 @@ struct GradeView: View {
             HStack {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(FlipgradeColor.paper.opacity(0.7))
                 Spacer()
                 Text(String(format: format, value.wrappedValue))
                     .font(.system(size: 10, weight: .regular).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(FlipgradeColor.paper.opacity(0.45))
             }
             Slider(value: value, in: range)
                 .controlSize(.small)
@@ -848,7 +848,7 @@ struct GradeView: View {
             HStack {
                 Text(kind.title)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(FlipgradeColor.paper.opacity(0.7))
                 Spacer(minLength: 0)
                 if hlLadderActive && shLadderActive {
                     Button(focused ? "viewing" : "view") {
@@ -856,7 +856,7 @@ struct GradeView: View {
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(focused ? Color.cyan.opacity(0.85) : Color.white.opacity(0.4))
+                    .foregroundStyle(focused ? Color.cyan.opacity(0.85) : FlipgradeColor.paper.opacity(0.4))
                 }
             }
             Picker("", selection: $hsDebugStage) {
@@ -869,11 +869,11 @@ struct GradeView: View {
             .disabled(!focused && hlLadderActive && shLadderActive)
             Text(hsDebugStage.hint(for: kind))
                 .font(.system(size: 10, weight: .regular))
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(FlipgradeColor.paper.opacity(0.4))
                 .fixedSize(horizontal: false, vertical: true)
             Text("Keys 1–4 flip · D dumps Desktop/\(kind.dumpFolder)")
                 .font(.system(size: 9, weight: .regular))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(FlipgradeColor.paper.opacity(0.35))
             if let ladderDumpStatus, focused {
                 Text(ladderDumpStatus)
                     .font(.system(size: 9, weight: .medium))

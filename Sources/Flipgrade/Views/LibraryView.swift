@@ -7,12 +7,12 @@ struct LibraryView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            FlipgradeColor.ink.ignoresSafeArea()
 
             if session.isLoading {
                 ProgressView()
                     .controlSize(.regular)
-                    .tint(.white)
+                    .tint(FlipgradeColor.paper)
             } else if session.recents.folders.isEmpty {
                 emptyState
             } else {
@@ -26,11 +26,11 @@ struct LibraryView: View {
         VStack(spacing: FlipgradeFont.stackSpacing) {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 48, weight: .regular))
-                .foregroundStyle(.white)
+                .foregroundStyle(FlipgradeColor.paper)
             Text(session.statusMessage)
                 .font(FlipgradeFont.ui)
                 .lineSpacing(FlipgradeFont.lineSpacing)
-                .foregroundStyle(.white)
+                .foregroundStyle(FlipgradeColor.paper)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Button("Open Folder…") {
@@ -83,18 +83,18 @@ private struct RecentFolderRow: View {
                 Text(record.displayName)
                     .font(FlipgradeFont.folder)
                     .lineSpacing(FlipgradeFont.folderLineSpacing)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(FlipgradeColor.accent)
                     .lineLimit(1)
 
                 Text(record.subtitlePhotos)
                     .font(FlipgradeFont.ui)
                     .lineSpacing(FlipgradeFont.lineSpacing)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(FlipgradeColor.paper)
 
                 Text(record.subtitleEdited)
                     .font(FlipgradeFont.ui)
                     .lineSpacing(FlipgradeFont.lineSpacing)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(FlipgradeColor.paper)
             }
 
             Spacer(minLength: 0)
@@ -111,10 +111,10 @@ private struct RecentFolderRow: View {
         } else {
             ZStack {
                 Rectangle()
-                    .fill(Color(white: 0.14))
+                    .fill(FlipgradeColor.surface)
                 Image(systemName: "photo")
                     .font(.system(size: FlipgradeFont.folderSize, weight: .regular))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(FlipgradeColor.paper)
             }
         }
     }
