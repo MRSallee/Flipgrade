@@ -169,27 +169,26 @@ struct CoverFlowView: View {
         let colWidth = max(0, textMaxWidth)
 
         return ZStack {
-            // Top-left — folder + active filter (hidden in 1:1 preview).
+            // Top-left — back + folder + active filter (hidden in 1:1 preview).
             if !session.isPixelZoom {
                 VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
                     if !folderName.isEmpty {
-                        Text(folderName)
-                            .font(FlipgradeFont.folder)
-                            .lineSpacing(FlipgradeFont.folderLineSpacing)
-                            .foregroundStyle(FlipgradeColor.accent)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        LibraryBackLink(title: folderName) {
+                            session.showLibrary()
+                        }
                     }
-                    if session.ratingLayer == .all {
-                        StarRow(rating: 0, maxStars: StarRating.maxStars)
-                    } else {
-                        StarRow(rating: filterStars, maxStars: StarRating.maxStars)
+                    Group {
+                        if session.ratingLayer == .all {
+                            StarRow(rating: 0, maxStars: StarRating.maxStars)
+                        } else {
+                            StarRow(rating: filterStars, maxStars: StarRating.maxStars)
+                        }
                     }
+                    .allowsHitTesting(false)
                 }
                 .frame(width: colWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(inset)
-                .allowsHitTesting(false)
             }
 
             // Bottom-left — file, capture date, rating (clickable).
@@ -564,6 +563,38 @@ struct CoverFlowView: View {
     }
 }
 
+// MARK: - Library back link
+
+private struct LibraryBackLink: View {
+    let title: String
+    let action: () -> Void
+
+    /// Cap-height-ish chevron so it matches letter height, not the full em box.
+    private var chevronSize: CGFloat { FlipgradeFont.folderSize * 0.62 }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .lastTextBaseline, spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: chevronSize, weight: .regular))
+                    // Nudge so the glyph sits on the text baseline rather than optical center.
+                    .alignmentGuide(.lastTextBaseline) { d in d[.bottom] - chevronSize * 0.12 }
+                Text(title)
+                    .font(FlipgradeFont.folder)
+                    .lineSpacing(FlipgradeFont.folderLineSpacing)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundStyle(FlipgradeColor.accent)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .pointingHandCursor()
+        .help("Back to Library")
+        .accessibilityLabel("Back to Library")
+    }
+}
+
 // MARK: - Finder link
 
 private struct RevealInFinderLink: View {
@@ -580,14 +611,8 @@ private struct RevealInFinderLink: View {
             .lineLimit(1)
             .truncationMode(.middle)
             .contentShape(Rectangle())
-            .onHover { hovering in
-                isHovering = hovering
-                if hovering {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
-                }
-            }
+            .onHover { isHovering = $0 }
+            .pointingHandCursor()
             .onTapGesture {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             }
@@ -632,6 +657,7 @@ private struct InteractiveStarRow: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
                 .help(star == rating ? "Clear rating" : "Rate \(star)★")
             }
         }

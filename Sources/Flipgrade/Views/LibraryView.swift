@@ -54,6 +54,7 @@ struct LibraryView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .contextMenu {
                         Button("Remove from Recents", role: .destructive) {
                             session.recents.remove(record)
