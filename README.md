@@ -6,6 +6,12 @@ Native macOS photo culling + grading.
 
 **Version:** v0.3.3 — Cover Flow framing + Golos chrome, folder/file details, focused-preview loader.
 
+## Download
+
+**[Flipgrade 0.3.3 for macOS](https://github.com/MRSallee/Flipgrade/releases/download/v0.3.3/Flipgrade-0.3.3.zip)** (Developer ID signed · arm64)
+
+Unzip, then right-click → **Open** the first time (not notarized yet). Requires macOS 14+.
+
 ## Cull model
 
 - **0–3 stars** on each photo (`0` `1` `2` `3`)
