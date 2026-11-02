@@ -44,21 +44,25 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.2</string>
+  <string>0.3.3</string>
   <key>CFBundleVersion</key>
-  <string>4</string>
+  <string>5</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>ATSApplicationFontsPath</key>
+  <string>Fonts</string>
 </dict>
 </plist>
 EOF
 
 cp "$BIN" "$APP/Contents/MacOS/Flipgrade"
 chmod +x "$APP/Contents/MacOS/Flipgrade"
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp "$ROOT/Sources/Flipgrade/Resources/Fonts/"*.ttf "$APP/Contents/Resources/Fonts/"
 
 # Stable ad-hoc identity so security-scoped bookmarks survive rebuilds.
 # Without -i, SwiftPM's hash identity changes every link and bookmarks stop resolving.

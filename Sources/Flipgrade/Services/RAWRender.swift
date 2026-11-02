@@ -240,10 +240,11 @@ enum RAWRender {
         return CIImage(cgImage: cg)
     }
 
-    /// Prefer highlight texture over punch for the as-shot / Grade-zero look.
-    /// Soft post-cubes can’t invent detail once CIRAW has already slammed fabric to 1.0 —
-    /// the headroom has to come from the RAW tone curve (boost / recovery / baseline).
-    /// Note: local tone map is unsupported on some cameras (e.g. Panasonic RW2) — don’t rely on it.
+    /// CIRAW defaults for Flip / Grade-zero.
+    /// Base 100 ≈ as-shot CIRAW (plus highlight recovery when available) — don't soft-cap
+    /// contrast or force tonemap; that just makes Flip look dimmer than the camera JPEG.
+    /// Softer Base / recover still opens tone-curve headroom via boost + baseline/shadows.
+    /// Note: local tone map is unsupported on some cameras (e.g. Panasonic RW2).
     nonisolated private static func applyHighlightFriendlyDefaults(
         to filter: CIRAWFilter,
         boostAmount: Double
@@ -255,22 +256,20 @@ enum RAWRender {
         }
         let boost = min(1, max(0, boostAmount))
         filter.boostAmount = Float(boost)
+
+        let headroom = 1.0 - boost
+        guard headroom > 0.0001 else { return }
+
         if filter.isContrastSupported {
-            // Default is often already 0; keep it soft if the camera sets a punchy value.
             filter.contrastAmount = max(0, min(filter.contrastAmount, 0.15))
         }
         if filter.isLocalToneMapSupported {
             filter.localToneMapAmount = max(filter.localToneMapAmount, 0.62)
         }
         if filter.isDetailSupported {
-            // Microcontrast helps embroidery/lettering once boost leaves headroom.
             filter.detailAmount = max(filter.detailAmount, 0.55)
         }
-        // Punch (boost≈1) stays mild. Recover layer (boost→0) needs real baseline headroom —
-        // ladder dumps showed recover still clipping lamp cores at boost 0.08 / weak pull.
-        let headroom = 1.0 - boost
-        let baselinePull = 0.04 + 0.32 * headroom
-        filter.baselineExposure = filter.baselineExposure - Float(baselinePull)
+        filter.baselineExposure = filter.baselineExposure - Float(0.32 * headroom)
         filter.boostShadowAmount = min(
             2.0,
             filter.boostShadowAmount + Float(0.06 + 0.10 * headroom)

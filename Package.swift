@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Flipgrade",
-            path: "Sources/Flipgrade"
+            path: "Sources/Flipgrade",
+            resources: [
+                .process("Resources")
+            ]
         )
     ]
 )

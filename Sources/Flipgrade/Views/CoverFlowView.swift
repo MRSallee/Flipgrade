@@ -11,13 +11,9 @@ struct CoverFlowView: View {
     /// Cull fan/lift + flip sample clock.
     @State private var clockNow = Date()
     @State private var pendingPreviewIDs: Set<String> = []
-    @State private var flashOpacity: Double = 0
-    @State private var displayedFlash: StarFlash?
-    @State private var flashHideTask: Task<Void, Never>?
     @State private var fanAnim: CullClockAnim?
     @State private var liftAnim: CullClockAnim?
     @State private var zoomMouseFraction = CGPoint(x: 0.5, y: 0.5)
-    @State private var isHoveringPhoto = false
     /// Accumulated trackpad/mouse-wheel delta — OS momentum keeps feeding this after lift.
     @State private var scrollDebt: CGFloat = 0
     /// Last selection used to bias prefetch toward scroll direction.
@@ -27,30 +23,31 @@ struct CoverFlowView: View {
     private let flipDuration: TimeInterval = 0.20
     private let liftAnimDuration: TimeInterval = 0.24
     private let fanAnimDuration: TimeInterval = 0.18
-    private let flashFadeDuration: TimeInterval = 0.05
-    private let flashHoldNanoseconds: UInt64 = 400_000_000
-    private let flashFadeNanoseconds: UInt64 = 50_000_000
     /// Points of vertical scroll per photo step (trackpad units).
     private let scrollStepThreshold: CGFloat = 48
 
     var body: some View {
         GeometryReader { geo in
+            let header = CoverFlowLayout.headerHeight(safeTop: geo.safeAreaInsets.top)
+            let stageSize = CGSize(width: geo.size.width, height: max(1, geo.size.height))
+            let layout = CoverFlowLayout(size: stageSize, bottomInset: header)
+            let inset = layout.bottomInset
+            let focusLeft = max(0, (stageSize.width - layout.focusMaxWidth) / 2)
+            // Window edge inset + same inset between text and the focus fit box.
+            let textMaxWidth = max(0, focusLeft - 2 * inset)
+
             ZStack {
                 Color.black
-                stage
+                stage(layout: layout, stageSize: stageSize)
                     .opacity(session.isPixelZoom ? 0 : 1)
                     .allowsHitTesting(!session.isPixelZoom)
                 if session.isPixelZoom {
                     pixelZoomOverlay(size: geo.size)
                 }
-                previewLoadingChrome
-                    .allowsHitTesting(false)
+                infoChrome(inset: inset, textMaxWidth: textMaxWidth)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
-            .onHover { hovering in
-                isHoveringPhoto = hovering
-            }
             .overlay {
                 ZoomMouseTracker(
                     syncToken: zoomMouseSyncToken,
@@ -134,10 +131,6 @@ struct CoverFlowView: View {
         .onChange(of: session.arrivingCards.map(\.id)) { _, _ in
             reloadImages(aheadBias: 0)
         }
-        .onChange(of: session.starFlash) { _, flash in
-            guard let flash else { return }
-            flashStarBadge(flash)
-        }
     }
 
     private var zoomMouseSyncToken: String {
@@ -153,65 +146,85 @@ struct CoverFlowView: View {
             ?? previews.displayImage(for: photo)
     }
 
-    private var previewLoadingChrome: some View {
-        VStack {
-            Spacer()
-            HStack {
-                if !pendingPreviewIDs.isEmpty {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(.white)
-                        Text("Loading previews…")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.85))
+    /// True while the focused photo still needs its first pixels or a soft→full upgrade.
+    private var isFocusPreviewLoading: Bool {
+        guard let photo = session.currentPhoto else { return false }
+        if previews.enhancingPhotoIDs.contains(photo.id) { return true }
+        if previews.viewportImages[photo.id] == nil,
+           previews.displayImage(for: photo) == nil {
+            return true
+        }
+        return false
+    }
+
+    /// TL folder/filter · BL file/date/rating · TR focused-preview loader.
+    /// Edge padding matches the focus bottom inset; text width stops an inset short of the focus box.
+    private func infoChrome(inset: CGFloat, textMaxWidth: CGFloat) -> some View {
+        let folderName = session.folderURL?.lastPathComponent ?? ""
+        let filterStars = session.ratingLayer.minimumRating
+        let photo = session.currentPhoto
+        let fileName = photo?.fileName ?? ""
+        let dateText = photo.flatMap { PhotoCaptureDate.displayString(for: $0.url) } ?? ""
+        let rating = session.ratingForCurrentPhoto()
+        let colWidth = max(0, textMaxWidth)
+
+        return ZStack {
+            // Top-left — folder + active filter.
+            VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
+                if !folderName.isEmpty {
+                    Text(folderName)
+                        .font(FlipgradeFont.folder)
+                        .lineSpacing(FlipgradeFont.folderLineSpacing)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                if session.ratingLayer == .all {
+                    StarRow(rating: 0, maxStars: StarRating.maxStars)
+                } else {
+                    StarRow(rating: filterStars, maxStars: StarRating.maxStars)
+                }
+            }
+            .frame(width: colWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(inset)
+            .allowsHitTesting(false)
+
+            // Bottom-left — file, capture date, rating (clickable).
+            VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
+                if let photo, !fileName.isEmpty {
+                    RevealInFinderLink(title: fileName, url: photo.url)
+                }
+                if !dateText.isEmpty {
+                    Text(dateText)
+                        .font(FlipgradeFont.ui)
+                        .lineSpacing(FlipgradeFont.lineSpacing)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                InteractiveStarRow(
+                    rating: rating,
+                    maxStars: StarRating.maxStars,
+                    onPick: { session.toggleOrSetRating($0) }
+                )
+            }
+            .frame(width: colWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .padding(inset)
+
+            // Top-right — focused preview loading only.
+            VStack {
+                HStack {
+                    Spacer()
+                    if isFocusPreviewLoading {
+                        EnhanceQualityBadge()
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .padding(14)
                 }
                 Spacer()
             }
+            .padding(inset)
+            .allowsHitTesting(false)
         }
-    }
-
-    /// Stars sit at the bottom of the focus frame (not screen-center).
-    private var starFlashOverlay: some View {
-        // Keep the view mounted while opacity animates — gating on opacity removes it
-        // instantly and looks like a blink instead of a fade.
-        Group {
-            if let flash = displayedFlash {
-                flashGlyph(flash)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .opacity(flashOpacity)
-                    .padding(.bottom, 18)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .allowsHitTesting(false)
-    }
-
-    /// Hover chrome: clickable stars (click current rating to clear).
-    private var hoverStarBar: some View {
-        let rating = session.ratingForCurrentPhoto()
-        return InteractiveStarRow(
-            rating: rating,
-            maxStars: StarRating.maxStars,
-            onPick: { session.toggleOrSetRating($0) }
-        )
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .padding(.bottom, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .opacity(isHoveringPhoto ? 1 : 0)
-        .allowsHitTesting(isHoveringPhoto)
-        .animation(.easeOut(duration: 0.12), value: isHoveringPhoto)
     }
 
     private func handleScrollWheel(deltaX: CGFloat, deltaY: CGFloat, naturalScrolling: Bool) {
@@ -240,152 +253,82 @@ struct CoverFlowView: View {
         }
     }
 
-    @ViewBuilder
-    private func flashGlyph(_ flash: StarFlash) -> some View {
-        switch flash.kind {
-        case .rating(let stars):
-            // 0★ → three empty stars (same row as 1–3).
-            StarRow(rating: stars, maxStars: StarRating.maxStars)
-        case .layer(let layer):
-            switch layer {
-            case .all:
-                Text("ALL")
-                    .font(.title2.weight(.bold))
-                    .tracking(2)
-            default:
-                StarRow(rating: layer.minimumRating, maxStars: StarRating.maxStars)
-            }
-        }
-    }
+    private func stage(layout: CoverFlowLayout, stageSize: CGSize) -> some View {
+        let fanRunning = fanAnim != nil
+        let liftRunning = liftAnim != nil
+        let restorePending = session.cullReversed
+        let flipRunning = flipAnim != nil
+        let clockRunning = liftRunning || fanRunning || restorePending || flipRunning
 
-    private func flashStarBadge(_ flash: StarFlash) {
-        flashHideTask?.cancel()
+        return ZStack {
+            // Stage outside TimelineView so preview swaps redraw while idle.
+            CoverFlowStage(
+                flowPosition: displayedFlow,
+                photos: session.activePhotos,
+                images: previews.viewportImages,
+                previewEpoch: previews.viewportRevision &+ session.previewTick,
+                departingCards: session.departingCards,
+                arrivingCards: session.arrivingCards,
+                // Follow the visual center while coasting — selection can already be
+                // at first/last while displayedFlow is still catching up.
+                focusID: visualFocusID,
+                departingFromCenter: session.isDepartingFromCenter,
+                // Keep center frame fixed on normal flips; deck slides behind it.
+                pinnedFocus: !session.isDepartingFromCenter,
+                fanStableIDs: session.fanStableIDs,
+                fanFromOffsets: session.fanFromOffsets,
+                fanArmed: session.fanArmed,
+                cullReversed: session.cullReversed,
+                fanClock: fanAnim.map { (start: $0.start, duration: $0.duration) },
+                liftClock: liftAnim.map { (start: $0.start, duration: $0.duration) },
+                now: clockNow,
+                layout: layout,
+                sideCount: sideCount,
+                onSelectIndex: { index in
+                    if index == session.selectionIndex {
+                        session.togglePixelZoom()
+                    } else {
+                        session.select(index: index)
+                    }
+                },
+                onDoubleTapIndex: { index in
+                    if index == session.selectionIndex {
+                        session.toggleFilterRelativeRating()
+                    } else {
+                        session.select(index: index)
+                    }
+                }
+            )
+            .transaction { $0.animation = nil }
 
-        let alreadyShowing = displayedFlash != nil && flashOpacity > 0.01
-        displayedFlash = flash
-
-        if alreadyShowing {
-            // Swap glyph in place; stay fully visible and restart the hold.
-            flashOpacity = 1
-        } else {
-            flashOpacity = 0
-            // Keep this animation off the Cover Flow flip transaction.
-            var fadeIn = Transaction(animation: .linear(duration: flashFadeDuration))
-            fadeIn.disablesAnimations = false
-            withTransaction(fadeIn) {
-                flashOpacity = 1
-            }
-        }
-
-        let holdBeforeFadeOut = alreadyShowing
-            ? flashHoldNanoseconds
-            : flashFadeNanoseconds + flashHoldNanoseconds
-
-        flashHideTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: holdBeforeFadeOut)
-            guard !Task.isCancelled else { return }
-            let fadeOut = Transaction(animation: .linear(duration: flashFadeDuration))
-            withTransaction(fadeOut) {
-                flashOpacity = 0
-            }
-            try? await Task.sleep(nanoseconds: flashFadeNanoseconds)
-            guard !Task.isCancelled else { return }
-            displayedFlash = nil
-        }
-    }
-
-    private var stage: some View {
-        GeometryReader { geo in
-            let layout = CoverFlowLayout(size: geo.size)
-            let fanRunning = fanAnim != nil
-            let liftRunning = liftAnim != nil
-            let restorePending = session.cullReversed
-            let flipRunning = flipAnim != nil
-            let clockRunning = liftRunning || fanRunning || restorePending || flipRunning
-
-            ZStack {
-                // Stage outside TimelineView so preview swaps redraw while idle.
-                CoverFlowStage(
-                    flowPosition: displayedFlow,
-                    photos: session.activePhotos,
-                    images: previews.viewportImages,
-                    previewEpoch: previews.viewportRevision &+ session.previewTick,
-                    enhancingPhotoIDs: previews.enhancingPhotoIDs,
-                    departingCards: session.departingCards,
-                    arrivingCards: session.arrivingCards,
-                    // Follow the visual center while coasting — selection can already be
-                    // at first/last while displayedFlow is still catching up.
-                    focusID: visualFocusID,
-                    departingFromCenter: session.isDepartingFromCenter,
-                    // Keep center frame fixed on normal flips; deck slides behind it.
-                    pinnedFocus: !session.isDepartingFromCenter,
-                    fanStableIDs: session.fanStableIDs,
-                    fanFromOffsets: session.fanFromOffsets,
-                    fanArmed: session.fanArmed,
-                    cullReversed: session.cullReversed,
-                    showEnhanceBadge: flipAnim == nil,
-                    fanClock: fanAnim.map { (start: $0.start, duration: $0.duration) },
-                    liftClock: liftAnim.map { (start: $0.start, duration: $0.duration) },
-                    now: clockNow,
-                    layout: layout,
-                    sideCount: sideCount,
-                    onSelectIndex: { index in
-                        if index == session.selectionIndex {
-                            session.togglePixelZoom()
-                        } else {
-                            session.select(index: index)
+            TimelineView(
+                .animation(minimumInterval: 1.0 / 60.0, paused: !clockRunning)
+            ) { timeline in
+                Color.clear
+                    .onChange(of: timeline.date) { _, newDate in
+                        guard clockRunning else { return }
+                        clockNow = newDate
+                        if flipRunning {
+                            let flow = flowPosition(at: newDate)
+                            if abs(flow - displayedFlow) > 0.0001 {
+                                displayedFlow = flow
+                            }
+                            finishFlipIfNeeded(at: newDate)
                         }
-                    },
-                    onDoubleTapIndex: { index in
-                        if index == session.selectionIndex {
-                            session.toggleFilterRelativeRating()
-                        } else {
-                            session.select(index: index)
+                        if fanRunning || liftRunning || restorePending {
+                            finishFanIfNeeded(at: newDate)
+                            finishLiftIfNeeded(at: newDate)
                         }
                     }
-                )
-                .transaction { $0.animation = nil }
-
-                // Stars anchored to the focus card footprint.
-                ZStack {
-                    starFlashOverlay
-                        .opacity(isHoveringPhoto ? 0 : 1)
-                        .allowsHitTesting(false)
-                    hoverStarBar
-                }
-                .frame(
-                    width: layout.centerSlot * layout.focusScale,
-                    height: layout.centerSlot * layout.focusScale
-                )
-
-                TimelineView(
-                    .animation(minimumInterval: 1.0 / 60.0, paused: !clockRunning)
-                ) { timeline in
-                    Color.clear
-                        .onChange(of: timeline.date) { _, newDate in
-                            guard clockRunning else { return }
-                            clockNow = newDate
-                            if flipRunning {
-                                let flow = flowPosition(at: newDate)
-                                if abs(flow - displayedFlow) > 0.0001 {
-                                    displayedFlow = flow
-                                }
-                                finishFlipIfNeeded(at: newDate)
-                            }
-                            if fanRunning || liftRunning || restorePending {
-                                finishFanIfNeeded(at: newDate)
-                                finishLiftIfNeeded(at: newDate)
-                            }
-                        }
-                }
-                .allowsHitTesting(false)
             }
-            .clipShape(Rectangle())
-            .contentShape(Rectangle())
-            .gesture(flipDrag)
-            .onAppear { clockNow = Date() }
+            .allowsHitTesting(false)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: stageSize.width, height: stageSize.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .clipShape(Rectangle())
+        .contentShape(Rectangle())
+        .gesture(flipDrag)
+        .onAppear { clockNow = Date() }
     }
 
     /// 1:1 pixel zoom — window maps onto the photo; mouse position selects the region.
@@ -436,12 +379,6 @@ struct CoverFlowView: View {
                     .tint(.white)
             }
 
-            if loadingFull {
-                EnhanceQualityBadge()
-                    .padding(14)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .allowsHitTesting(false)
-            }
 
             // Tap target under star chrome so star buttons still receive clicks.
             Color.clear
@@ -452,9 +389,6 @@ struct CoverFlowView: View {
                 .onTapGesture(count: 1) {
                     session.togglePixelZoom()
                 }
-
-            hoverStarBar
-                .frame(width: size.width, height: size.height)
         }
         .frame(width: size.width, height: size.height)
     }
@@ -628,6 +562,38 @@ struct CoverFlowView: View {
     }
 }
 
+// MARK: - Finder link
+
+private struct RevealInFinderLink: View {
+    let title: String
+    let url: URL
+    @State private var isHovering = false
+
+    var body: some View {
+        Text(title)
+            .font(FlipgradeFont.ui)
+            .lineSpacing(FlipgradeFont.lineSpacing)
+            .foregroundStyle(.white)
+            .underline(isHovering, color: .white)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                isHovering = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onTapGesture {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+            .help("Reveal in Finder")
+            .accessibilityAddTraits(.isLink)
+    }
+}
+
 // MARK: - Stars
 
 private struct StarRow: View {
@@ -635,13 +601,14 @@ private struct StarRow: View {
     let maxStars: Int
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(1...maxStars, id: \.self) { star in
                 Image(systemName: star <= rating ? "star.fill" : "star")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(.system(size: FlipgradeFont.size, weight: .regular))
+                    .foregroundStyle(.white)
             }
         }
+        .frame(height: FlipgradeFont.lineHeight, alignment: .center)
     }
 }
 
@@ -651,25 +618,26 @@ private struct InteractiveStarRow: View {
     let onPick: (Int) -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(1...maxStars, id: \.self) { star in
                 Button {
                     onPick(star)
                 } label: {
                     Image(systemName: star <= rating ? "star.fill" : "star")
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 28, height: 28)
+                        .font(.system(size: FlipgradeFont.size, weight: .regular))
+                        .foregroundStyle(.white)
+                        .frame(width: FlipgradeFont.lineHeight, height: FlipgradeFont.lineHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(star == rating ? "Clear rating" : "Rate \(star)★")
             }
         }
+        .frame(height: FlipgradeFont.lineHeight, alignment: .center)
     }
 }
 
-/// Eye + capsule bar while a higher-quality preview is decoding (indeterminate — no byte %).
+/// Capsule bar while the focused preview is decoding (indeterminate — no byte %).
 private struct EnhanceQualityBadge: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
@@ -678,23 +646,17 @@ private struct EnhanceQualityBadge: View {
             let pulse = 0.5 + 0.5 * sin(t * 2.2)
             let fill = 0.15 + 0.70 * pulse
 
-            HStack(spacing: 7) {
-                Image(systemName: "eye")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .strokeBorder(Color.white.opacity(0.95), lineWidth: 1.2)
-                        Capsule()
-                            .fill(Color.white)
-                            .frame(width: max(5, (geo.size.width - 3) * fill))
-                            .padding(1.5)
-                    }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .strokeBorder(Color.white.opacity(0.95), lineWidth: 1.2)
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: max(5, (geo.size.width - 3) * fill))
+                        .padding(1.5)
                 }
-                .frame(width: 78, height: 7)
             }
+            .frame(width: 78, height: 7)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -753,30 +715,60 @@ private struct CullClockAnim {
 // MARK: - Layout + stage
 
 private struct CoverFlowLayout {
+    /// Header-sized bottom inset reserved under the shared focus fit box.
+    let bottomInset: CGFloat
+    /// Fit box for the focused image (shared by L2/L3 so midpoints stay aligned).
+    let focusMaxWidth: CGFloat
+    let focusMaxHeight: CGFloat
+    /// Larger fit-box edge — used for lift distance / legacy slot math.
     let centerSlot: CGFloat
-    let sideScale: CGFloat
+    /// Focused card scale (1.0 — slot already is the focus size).
     let focusScale: CGFloat
-    let tiltDegrees: Double
+    /// L2 (first neighbor) relative to focus.
+    let layer1Scale: CGFloat
+    /// L3 (outer) relative to focus (= layer1²).
+    let layer2Scale: CGFloat
+    /// Distance from stage center to L2 card center.
     let layer1X: CGFloat
+    /// Distance from stage center to L3 card center.
     let layer2X: CGFloat
 
-    init(size: CGSize) {
-        let focusScale: CGFloat = 1.30
-        let maxFocusExtent = min(size.width * 0.56, size.height * 0.92)
-        let centerSlot = min(size.width * 0.46, size.height * 0.94, maxFocusExtent / focusScale)
-        let edgePad: CGFloat = 20
-        let sideScale: CGFloat = 0.88
-        let tiltDegrees: Double = 38
-        let cosTilt = abs(CGFloat(Foundation.cos(tiltDegrees * .pi / 180)))
-        let layer2Half = centerSlot * sideScale * 0.5 * max(cosTilt, 0.35)
-        let layer2X = max(centerSlot * 0.55, size.width * 0.5 - edgePad - layer2Half)
-        let layer1Base = min(centerSlot * 0.42, layer2X * 0.55) * 1.20
-        let layer1X = min(layer1Base * 1.18, layer2X * 0.92)
+    /// Window header / titlebar height — used as the focus bottom inset.
+    static func headerHeight(safeTop: CGFloat) -> CGFloat {
+        if safeTop > 1 { return safeTop }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            let chrome = window.frame.height - window.contentLayoutRect.height
+            if chrome > 1 { return chrome }
+        }
+        return 28
+    }
 
+    init(size: CGSize, bottomInset: CGFloat) {
+        let inset = max(0, bottomInset)
+        let focusScale: CGFloat = 1.0
+        let layer1Scale: CGFloat = 0.70
+        let layer2Scale: CGFloat = layer1Scale * layer1Scale
+        // Top at header baseline; matching bottom inset. L2/L3 use this same box.
+        let focusMaxHeight = max(1, size.height - inset)
+        let focusMaxWidth = min(max(1, size.width), focusMaxHeight)
+        let centerSlot = max(focusMaxWidth, focusMaxHeight)
+
+        // Flat stack: each side card sits 60% under the layer above (40% peek).
+        // 50% would put the lower center on the upper outer edge; extra tuck pulls it inward.
+        let under: CGFloat = 0.60
+        let tuck = under - 0.5
+        let focusOuter = focusMaxWidth * focusScale * 0.5
+        let layer1X = focusOuter - tuck * focusMaxWidth * layer1Scale
+        let layer2Outer = layer1X + focusMaxWidth * layer1Scale * 0.5
+        let layer2X = layer2Outer - tuck * focusMaxWidth * layer2Scale
+
+        self.bottomInset = inset
+        self.focusMaxWidth = focusMaxWidth
+        self.focusMaxHeight = focusMaxHeight
         self.centerSlot = centerSlot
-        self.sideScale = sideScale
         self.focusScale = focusScale
-        self.tiltDegrees = tiltDegrees
+        self.layer1Scale = layer1Scale
+        self.layer2Scale = layer2Scale
         self.layer1X = layer1X
         self.layer2X = layer2X
     }
@@ -787,7 +779,6 @@ private struct CoverFlowStage: View {
     let photos: [PhotoItem]
     let images: [String: NSImage]
     let previewEpoch: UInt64
-    let enhancingPhotoIDs: Set<String>
     let departingCards: [DepartingCard]
     let arrivingCards: [DepartingCard]
     let focusID: String?
@@ -799,8 +790,6 @@ private struct CoverFlowStage: View {
     let fanFromOffsets: [String: CGFloat]
     let fanArmed: Bool
     let cullReversed: Bool
-    /// Hide enhance chrome while Cover Flow is mid-slide.
-    let showEnhanceBadge: Bool
     /// Fan clock: discard L1→L2, restore L2→L1.
     let fanClock: (start: Date, duration: TimeInterval)?
     let liftClock: (start: Date, duration: TimeInterval)?
@@ -893,6 +882,9 @@ private struct CoverFlowStage: View {
                 pinnedFocusCard(photo: photo, index: index)
             }
         }
+        // Shared fit box is shorter by bottomInset; shift up so top sits on the header
+        // baseline and L1/L2/L3 share that midpoint (not the raw stage center).
+        .offset(y: -layout.bottomInset / 2)
     }
 
     /// Index range on stage (unordered).
@@ -920,12 +912,6 @@ private struct CoverFlowStage: View {
         if a <= fadeStart { return 1 }
         if a >= fadeEnd { return 0 }
         return Double(1 - (a - fadeStart) / (fadeEnd - fadeStart))
-    }
-
-    private func shadowStrength(absOffset a: CGFloat) -> CGFloat {
-        if a <= 1 { return 1 }
-        if a >= 2 { return 0 }
-        return 2 - a
     }
 
     private func xPosition(offset: CGFloat) -> CGFloat {
@@ -1045,12 +1031,6 @@ private struct CoverFlowStage: View {
         return (-liftDistance * slideU, baseOpacity * Double(1 - fadeU), true)
     }
 
-    private func tiltAngle(for offset: CGFloat) -> Double {
-        guard abs(offset) > 0.0001 else { return 0 }
-        let tiltAmount = min(abs(offset), 1.0) * layout.tiltDegrees
-        return offset < 0 ? tiltAmount : -tiltAmount
-    }
-
     /// Slot newcomers ease in from — past the edge fade so they don't pop opaque.
     private func fanEntryOffset(for offset: CGFloat) -> CGFloat {
         guard abs(offset) > 0.0001 else { return 0 }
@@ -1059,23 +1039,81 @@ private struct CoverFlowStage: View {
     }
 
     /// Start pose for fan-in: last slot when reflowing, past fade-edge for newcomers.
-    private func fanStart(offset: CGFloat, fromOffset: CGFloat?) -> (x: CGFloat, angle: Double) {
+    private func fanStartX(offset: CGFloat, fromOffset: CGFloat?) -> CGFloat {
         if let fromOffset {
-            return (xPosition(offset: fromOffset), tiltAngle(for: fromOffset))
+            return xPosition(offset: fromOffset)
         }
-        let entry = fanEntryOffset(for: offset)
-        return (xPosition(offset: entry), tiltAngle(for: entry))
+        return xPosition(offset: fanEntryOffset(for: offset))
+    }
+
+    /// Width of the focused image inside the fit box (falls back to the slot width).
+    private var focusImageWidth: CGFloat {
+        let box = CGSize(width: layout.focusMaxWidth, height: layout.focusMaxHeight)
+        if let focusID, let image = images[focusID] {
+            return fittedSize(for: image, in: box).width
+        }
+        return layout.focusMaxWidth
+    }
+
+    /// Outer→inner location (0…1) where the layer above starts covering this card.
+    private func occlusionOverlapLocation(
+        offset: CGFloat,
+        scale: CGFloat,
+        cardWidth: CGFloat
+    ) -> CGFloat {
+        let half = cardWidth * scale * 0.5
+        guard half > 0.5 else { return 0.5 }
+        let center = abs(xPosition(offset: offset))
+        let absOff = abs(offset)
+
+        // Outer edge of the layer sitting on top of this card (stage coords, focus side).
+        let upperOuterEdge: CGFloat
+        if absOff <= 1.5 {
+            upperOuterEdge = focusImageWidth * layout.focusScale * 0.5
+        } else {
+            // L2 outer edge ≈ L2 center + L2 half-width (use focus aspect as stand-in).
+            let l2Half = focusImageWidth * layout.layer1Scale * 0.5
+            upperOuterEdge = layout.layer1X + l2Half
+        }
+
+        let outer = center + half
+        let inner = center - half
+        let span = outer - inner
+        guard span > 0.5 else { return 0.5 }
+        return min(0.98, max(0.02, (outer - upperOuterEdge) / span))
+    }
+
+    private static let focusStroke = Color(red: 0x66 / 255, green: 0x66 / 255, blue: 0x66 / 255)
+
+    /// Occlusion wash: 30% at the outer peek → 90% from the upper-layer edge inward.
+    @ViewBuilder
+    private func sideOcclusionGradient(
+        offset: CGFloat,
+        scale: CGFloat,
+        cardWidth: CGFloat
+    ) -> some View {
+        let outerIsLeading = offset < 0
+        let stop = occlusionOverlapLocation(offset: offset, scale: scale, cardWidth: cardWidth)
+        LinearGradient(
+            stops: [
+                .init(color: .black.opacity(0.30), location: 0),
+                .init(color: .black.opacity(0.90), location: stop),
+                .init(color: .black.opacity(0.90), location: 1)
+            ],
+            startPoint: outerIsLeading ? .leading : .trailing,
+            endPoint: outerIsLeading ? .trailing : .leading
+        )
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
     private func pinnedFocusCard(photo: PhotoItem, index: Int) -> some View {
         let image = images[photo.id]
-        let maxSize = CGSize(width: layout.centerSlot, height: layout.centerSlot)
+        let maxSize = CGSize(width: layout.focusMaxWidth, height: layout.focusMaxHeight)
         let cardSize = fittedSize(for: image, in: maxSize)
-        let cornerRadius: CGFloat = 6
 
         ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            Rectangle()
                 .fill(Color(white: 0.14))
                 .frame(width: cardSize.width, height: cardSize.height)
 
@@ -1088,18 +1126,14 @@ private struct CoverFlowStage: View {
                     .transaction { $0.animation = nil }
             }
 
-            if showEnhanceBadge, enhancingPhotoIDs.contains(photo.id) {
-                EnhanceQualityBadge()
-                    .padding(10)
-                    .frame(width: cardSize.width, height: cardSize.height, alignment: .bottomLeading)
-            }
         }
         .frame(width: cardSize.width, height: cardSize.height)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .frame(width: maxSize.width, height: maxSize.height, alignment: .center)
-        .scaleEffect(layout.focusScale, anchor: .center)
+        .clipShape(Rectangle())
+        .overlay {
+            Rectangle()
+                .stroke(Self.focusStroke, lineWidth: 1)
+        }
         .zIndex(120)
-        .shadow(color: .black.opacity(1), radius: 96, y: 22)
         .onTapGesture(count: 2) {
             if let onDoubleTapIndex {
                 onDoubleTapIndex(index)
@@ -1129,10 +1163,7 @@ private struct CoverFlowStage: View {
         let image = images[photo.id]
         let a = abs(offset)
         let isCenter = a < 0.5 && !lifting
-        let finalAngle = tiltAngle(for: offset)
-        let maxSize = CGSize(width: layout.centerSlot, height: layout.centerSlot)
-        let cardSize = fittedSize(for: image, in: maxSize)
-        let cornerRadius: CGFloat = 6
+        let maxSize = CGSize(width: layout.focusMaxWidth, height: layout.focusMaxHeight)
 
         let finalX = xPosition(offset: offset)
         let fanT = localFanProgress(
@@ -1141,9 +1172,8 @@ private struct CoverFlowStage: View {
             fromOffset: fromOffset,
             focusHandoff: focusHandoff
         )
-        let start = fanStart(offset: offset, fromOffset: fromOffset)
-        let liveX = start.x + (finalX - start.x) * fanT
-        let liveAngle = start.angle + (finalAngle - start.angle) * fanT
+        let startX = fanStartX(offset: offset, fromOffset: fromOffset)
+        let liveX = startX + (finalX - startX) * fanT
         // Pose on screen (held/reflow start) — depth, fade, and scale follow this, not the destination.
         let poseOffset: CGFloat = {
             if lifting { return offset }
@@ -1154,21 +1184,33 @@ private struct CoverFlowStage: View {
             return entry + (offset - entry) * fanT
         }()
         let poseA = abs(poseOffset)
-        let baseScale: CGFloat = poseA <= 1
-            ? (layout.focusScale + (layout.sideScale - layout.focusScale) * poseA)
-            : layout.sideScale
+        // Flat stack: L0 focus → L2 @ 70% → L3 @ 49%.
+        let baseScale: CGFloat = {
+            if poseA <= 1 {
+                return layout.focusScale + (layout.layer1Scale - layout.focusScale) * poseA
+            }
+            if poseA <= 2 {
+                return layout.layer1Scale + (layout.layer2Scale - layout.layer1Scale) * (poseA - 1)
+            }
+            return layout.layer2Scale
+        }()
         let handoffCenter = focusHandoff && fanT > 0.5
         let scale = baseScale
+        // Fit into a pre-scaled box so the card's layout bounds match its visual size —
+        // ZStack then centers L2/L3 on the same midpoint as L1 (no scaleEffect drift).
+        let fitBox = CGSize(width: maxSize.width * scale, height: maxSize.height * scale)
+        let cardSize = fittedSize(for: image, in: fitBox)
         let baseOpacity = edgeOpacity(absOffset: poseA)
 
         let lift = lifting
             ? liftMotion(baseOpacity: baseOpacity, skipGray: skipGrayLift, reversed: liftReversed)
             : (y: 0, opacity: baseOpacity, gray: false)
         let grayed = lift.gray
+        let showSideWash = !isCenter && !lifting && poseA > 0.05
 
         ZStack {
             // Dark placeholder while Drive/ImageIO hydrate the embedded preview.
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            Rectangle()
                 .fill(Color(white: 0.14))
                 .frame(width: cardSize.width, height: cardSize.height)
 
@@ -1183,39 +1225,31 @@ private struct CoverFlowStage: View {
                     .transaction { $0.animation = nil }
             }
 
-            if isCenter, showEnhanceBadge, enhancingPhotoIDs.contains(photo.id) {
-                EnhanceQualityBadge()
-                    .padding(10)
-                    .frame(width: cardSize.width, height: cardSize.height, alignment: .bottomLeading)
+            if showSideWash {
+                // Scale is already baked into cardSize.
+                sideOcclusionGradient(offset: poseOffset, scale: 1, cardWidth: cardSize.width)
+                    .frame(width: cardSize.width, height: cardSize.height)
             }
+
         }
         .frame(width: cardSize.width, height: cardSize.height)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .frame(width: maxSize.width, height: maxSize.height, alignment: .center)
+        .clipShape(Rectangle())
+        .overlay {
+            if isCenter {
+                Rectangle()
+                    .stroke(Self.focusStroke, lineWidth: 1)
+            }
+        }
         .saturation(grayed ? 0.0 : 1.0)
         .brightness(grayed ? -0.12 : 0)
         .opacity(lift.opacity)
-        .scaleEffect(scale, anchor: .center)
-        .rotation3DEffect(
-            .degrees(liveAngle),
-            axis: (x: 0, y: 1, z: 0),
-            anchor: .center,
-            anchorZ: 0,
-            perspective: 0.5
-        )
         .offset(x: liveX, y: lift.y)
-        // Same depth formula as before the preview-chase rewrites.
         .zIndex(
             Double(100 - poseA * 10)
                 + (isCenter ? 1 : 0)
                 + (lifting ? 1 : 0)
                 + (handoffCenter ? 0.25 : 0)
                 - (focusHandoff && fanT < 0.95 ? 0.5 : 0)
-        )
-        .shadow(
-            color: .black.opacity(Double(shadowStrength(absOffset: poseA))),
-            radius: 96 * shadowStrength(absOffset: poseA),
-            y: 22 * shadowStrength(absOffset: poseA)
         )
         .allowsHitTesting(lift.opacity > 0.05 && !lifting)
         .onTapGesture(count: 2) {

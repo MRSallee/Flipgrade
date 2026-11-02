@@ -7,8 +7,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 IDENTITY="Developer ID Application: Mark Ryan Sallee (F296W5W82Q)"
-VERSION="0.3.2"
-BUILD="4"
+VERSION="0.3.3"
+BUILD="5"
 DIST_DIR="${HOME}/Desktop/Flipgrade-Distribute"
 APP="$DIST_DIR/Flipgrade.app"
 ZIP="$DIST_DIR/Flipgrade-${VERSION}.zip"
@@ -55,6 +55,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>ATSApplicationFontsPath</key>
+  <string>Fonts</string>
 </dict>
 </plist>
 EOF
@@ -75,6 +77,8 @@ EOF
 
 cp "$BIN" "$APP/Contents/MacOS/Flipgrade"
 chmod +x "$APP/Contents/MacOS/Flipgrade"
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp "$ROOT/Sources/Flipgrade/Resources/Fonts/"*.ttf "$APP/Contents/Resources/Fonts/"
 
 echo "Signing with Developer ID…"
 codesign --force --options runtime --timestamp \

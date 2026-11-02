@@ -4,7 +4,7 @@ Native macOS photo culling + grading.
 
 **Photo editing shouldn’t be a chore.** Flip through a folder fast, star your favorites, grade later.
 
-**Version:** v0.3.2 — momentum Cover Flow scroll, responsive previews, stage-capped layer culls.
+**Version:** v0.3.3 — Cover Flow framing + Golos chrome, folder/file details, focused-preview loader.
 
 ## Cull model
 

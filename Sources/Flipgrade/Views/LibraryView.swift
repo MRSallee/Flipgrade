@@ -23,12 +23,14 @@ struct LibraryView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: FlipgradeFont.stackSpacing) {
             Image(systemName: "photo.on.rectangle.angled")
-                .font(.system(size: 48))
-                .foregroundStyle(.white.opacity(0.85))
+                .font(.system(size: 48, weight: .regular))
+                .foregroundStyle(.white)
             Text(session.statusMessage)
-                .foregroundStyle(.white.opacity(0.9))
+                .font(FlipgradeFont.ui)
+                .lineSpacing(FlipgradeFont.lineSpacing)
+                .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             Button("Open Folder…") {
@@ -75,21 +77,24 @@ private struct RecentFolderRow: View {
         HStack(alignment: .center, spacing: 20) {
             thumbnailView
                 .frame(width: 96, height: 96)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .clipped()
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: FlipgradeFont.stackSpacing) {
                 Text(record.displayName)
-                    .font(.system(size: 28, weight: .semibold))
+                    .font(FlipgradeFont.folder)
+                    .lineSpacing(FlipgradeFont.folderLineSpacing)
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
                 Text(record.subtitlePhotos)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.45))
+                    .font(FlipgradeFont.ui)
+                    .lineSpacing(FlipgradeFont.lineSpacing)
+                    .foregroundStyle(.white)
 
                 Text(record.subtitleEdited)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.45))
+                    .font(FlipgradeFont.ui)
+                    .lineSpacing(FlipgradeFont.lineSpacing)
+                    .foregroundStyle(.white)
             }
 
             Spacer(minLength: 0)
@@ -105,11 +110,11 @@ private struct RecentFolderRow: View {
                 .aspectRatio(contentMode: .fill)
         } else {
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                Rectangle()
                     .fill(Color(white: 0.14))
                 Image(systemName: "photo")
-                    .font(.system(size: 28, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .font(.system(size: FlipgradeFont.folderSize, weight: .regular))
+                    .foregroundStyle(.white)
             }
         }
     }

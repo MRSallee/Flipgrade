@@ -13,10 +13,7 @@ struct RecentFolderRecord: Identifiable, Codable, Equatable, Sendable {
     var thumbnailFileName: String?
 
     var subtitlePhotos: String {
-        if ratedCount > 0 {
-            return "\(photoCount) photos (\(ratedCount) rated)"
-        }
-        return "\(photoCount) photos"
+        "\(photoCount) photos"
     }
 
     var subtitleEdited: String {
