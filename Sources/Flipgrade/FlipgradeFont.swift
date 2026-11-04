@@ -39,16 +39,36 @@ enum FlipgradeFont {
     private static let familyName = "Golos Text"
 
     /// Register the bundled variable font (safe to call more than once).
+    ///
+    /// Never touch `Bundle.module` here — in a packaged `.app` SPM's resource-bundle
+    /// lookup asserts and kills launch (`NSBundle.module` / `Flipgrade_Flipgrade`).
     static func registerBundledFonts() {
-        let candidates: [URL?] = [
-            Bundle.main.url(forResource: "GolosText-VariableFont_wght", withExtension: "ttf", subdirectory: "Fonts"),
-            Bundle.main.url(forResource: "GolosText-VariableFont_wght", withExtension: "ttf"),
-            Bundle.module.url(forResource: "GolosText-VariableFont_wght", withExtension: "ttf", subdirectory: "Fonts"),
-            Bundle.module.url(forResource: "GolosText-VariableFont_wght", withExtension: "ttf")
-        ]
-        for case let url? in candidates {
-            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
-            return
+        let name = "GolosText-VariableFont_wght"
+        for bundle in fontSearchBundles() {
+            if let url = bundle.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
+                ?? bundle.url(forResource: name, withExtension: "ttf") {
+                CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+                return
+            }
         }
+    }
+
+    /// App Resources first; then an on-disk SPM resource bundle if present (debug `swift run`).
+    private static func fontSearchBundles() -> [Bundle] {
+        var bundles: [Bundle] = [.main]
+        let spmName = "Flipgrade_Flipgrade.bundle"
+        let neighbors: [URL?] = [
+            Bundle.main.resourceURL?.appendingPathComponent(spmName),
+            Bundle.main.bundleURL.appendingPathComponent(spmName),
+            Bundle.main.executableURL?
+                .deletingLastPathComponent()
+                .appendingPathComponent(spmName)
+        ]
+        for case let url? in neighbors {
+            if let bundle = Bundle(url: url), !bundles.contains(where: { $0.bundlePath == bundle.bundlePath }) {
+                bundles.append(bundle)
+            }
+        }
+        return bundles
     }
 }

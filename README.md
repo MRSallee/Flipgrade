@@ -4,11 +4,11 @@ Native macOS photo culling + grading.
 
 **Photo editing shouldn’t be a chore.** Flip through a folder fast, star your favorites, grade later.
 
-**Version:** v0.3.4 — brand palette, quieter traffic lights, Cover Flow chrome polish.
+**Version:** v0.3.5 — fix launch crash on packaged builds (bundled font / `Bundle.module`).
 
 ## Download
 
-**[Flipgrade 0.3.4 for macOS](https://github.com/MRSallee/Flipgrade/releases/tag/v0.3.4)** (Developer ID signed · arm64)
+**[Flipgrade 0.3.5 for macOS](https://github.com/MRSallee/Flipgrade/releases/tag/v0.3.5)** (Developer ID signed · arm64)
 
 Unzip, then right-click → **Open** the first time (not notarized yet). Requires macOS 14+.
 
