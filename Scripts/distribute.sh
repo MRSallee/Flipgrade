@@ -1,7 +1,7 @@
 #!/bin/zsh
-# Build a Developer ID–signed Flipgrade.app + zip for sharing.
-# Notarization is optional (needs notarytool credentials); without it Gatekeeper
-# still allows right-click → Open on the recipient Mac.
+# Build a Developer ID–signed Flipgrade.app, notarize, staple, zip for sharing.
+# Uses the same notarytool keychain profile as Audiochrome (team credentials, not per-app).
+# Skip notarization with SKIP_NOTARIZE=1.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -13,6 +13,8 @@ DIST_DIR="${HOME}/Desktop/Flipgrade-Distribute"
 APP="$DIST_DIR/Flipgrade.app"
 ZIP="$DIST_DIR/Flipgrade-${VERSION}.zip"
 ENTITLEMENTS="$DIST_DIR/Flipgrade.entitlements"
+# Same team profile Audiochrome's package-app.sh uses.
+NOTARY_PROFILE="${NOTARY_PROFILE:-Audiochrome}"
 
 # Generated absolute paths (same as run.sh).
 GENERATED="$ROOT/Sources/Flipgrade/Generated"
@@ -93,22 +95,36 @@ codesign --force --deep --options runtime --timestamp \
 
 echo "Verifying signature…"
 codesign --verify --deep --strict --verbose=2 "$APP"
-spctl --assess --type execute --verbose=4 "$APP" 2>&1 || true
 
-echo "Zipping…"
-# ditto preserves extended attributes / resource forks Gatekeeper cares about.
+# Strip sync xattrs that can confuse Gatekeeper / staple (same as Audiochrome).
+if command -v xattr >/dev/null; then
+  xattr -cr "$APP" 2>/dev/null || true
+fi
+
+echo "Zipping for notarization…"
+rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
+
+if [[ "${SKIP_NOTARIZE:-0}" == "1" ]]; then
+  echo "SKIP_NOTARIZE=1 — signed zip at $ZIP (not notarized)"
+else
+  echo "Submitting to Apple notarization (profile: $NOTARY_PROFILE)…"
+  xcrun notarytool submit "$ZIP" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+  echo "Stapling notarization ticket…"
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  echo "Re-zipping stapled app…"
+  rm -f "$ZIP"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+fi
 
 rm -f "$ENTITLEMENTS"
 
 echo ""
 echo "Ready to share:"
 echo "  $ZIP"
-echo ""
-echo "Note: Notarization credentials are not configured. Recipients may need"
-echo "  right-click → Open  the first time (Gatekeeper)."
-echo "To notarize later: xcrun notarytool store-credentials, then"
-echo "  xcrun notarytool submit \"$ZIP\" --keychain-profile <name> --wait"
-echo "  xcrun stapler staple \"$APP\""
+spctl --assess --type execute --verbose=4 "$APP" 2>&1 || true
 file "$APP/Contents/MacOS/Flipgrade"
 codesign -dv "$APP" 2>&1 | egrep 'Authority|TeamIdentifier|Identifier|Format|Signature'
